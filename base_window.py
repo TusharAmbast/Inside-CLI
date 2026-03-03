@@ -1,4 +1,5 @@
 import os
+import platform
 import psutil
 from PySide6.QtWidgets import QMainWindow, QLabel
 from PySide6.QtCore import Qt, QTimer
