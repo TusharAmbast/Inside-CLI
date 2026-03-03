@@ -9,3 +9,5 @@ llm/
 cli/
 cli1/
 __pycache__/
+lib/
+macos/Runner/

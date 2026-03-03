@@ -1,0 +1,198 @@
+import os
+import psutil
+from PySide6.QtWidgets import QMainWindow, QLabel
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont, QFontDatabase
+
+
+class BaseMonitorWindow(QMainWindow):
+    def __init__(self, active_tab="SYSTEM USAGE"):
+        super().__init__()
+        self.setGeometry(100, 100, 700, 450)
+        self.setWindowFlags(Qt.CustomizeWindowHint | Qt.WindowCloseButtonHint | Qt.WindowMinMaxButtonsHint)
+        self.setStyleSheet("background-color: #FEF3D7; QMainWindow { background-color: #FEF3D7; }")
+        
+        # Base dimensions for ratio calculations
+        self.base_width = 700
+        self.base_height = 450
+        
+        # Track which tab is active
+        self.active_tab = active_tab
+        
+        # Load fonts
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        abril_path = os.path.join(script_dir, "Fonts/Abril Fatface/AbrilFatface-Regular.ttf")
+        QFontDatabase.addApplicationFont(abril_path)
+        
+        inter_path = os.path.join(script_dir, "Fonts/Inter Font Family/Inter-ExtraBold.otf")
+        QFontDatabase.addApplicationFont(inter_path)
+        
+        inter_semibold_path = os.path.join(script_dir, "Fonts/Inter Font Family/Inter-SemiBold.otf")
+        QFontDatabase.addApplicationFont(inter_semibold_path)
+        
+        # Element definitions with base font sizes and positions
+        self.elements = [
+            {
+                "text": "Inside Cli",
+                "font_name": "Abril Fatface",
+                "base_font_size": 36,
+                "base_pos": (513, 22),
+                "color": "rgb(63, 72, 101)",
+                "opacity": 1.0,
+                "label": None
+            },
+            {
+                "text": "SYSTEM USAGE",
+                "font_name": "Inter",
+                "base_font_size": 14,
+                "base_pos": (39, 56),
+                "color": "rgb(63, 72, 101)",
+                "opacity": 1.0 if active_tab == "SYSTEM USAGE" else 0.4,
+                "label": None,
+                "is_extra_bold": True
+            },
+            {
+                "text": "SCATTER PLOT",
+                "font_name": "Inter",
+                "base_font_size": 14,
+                "base_pos": (196, 56),
+                "color": "rgb(63, 72, 101)",
+                "opacity": 1.0 if active_tab == "SCATTER PLOT" else 0.4,
+                "label": None,
+                "is_extra_bold": True
+            },
+            {
+                "text": "ANOMALY",
+                "font_name": "Inter",
+                "base_font_size": 14,
+                "base_pos": (349, 56),
+                "color": "rgb(63, 72, 101)",
+                "opacity": 1.0 if active_tab == "ANOMALY" else 0.4,
+                "label": None,
+                "is_extra_bold": True
+            }
+        ]
+        
+        # Create all labels
+        for elem in self.elements:
+            label = QLabel(elem["text"], self)
+            elem["label"] = label
+        
+        # Add bottom stats
+        self.add_bottom_stats()
+        
+        # Setup timer for live stats updates
+        self.stats_timer = QTimer()
+        self.stats_timer.timeout.connect(self.update_stats)
+        self.stats_timer.start(1000)  # Update every 1 second
+        
+        self.update_layout()
+    
+    def add_bottom_stats(self):
+        """Add CPU, RAM, and DISK stats at the bottom with live updates"""
+        self.stat_labels = {}
+        
+        stats = [
+            {
+                "key": "cpu",
+                "text": "CPU : ",
+                "font_name": "Inter",
+                "base_font_size": 16,
+                "base_pos": (32, 424),
+                "color": "rgb(255, 170, 30)",
+                "is_semibold": True
+            },
+            {
+                "key": "ram",
+                "text": "RAM : ",
+                "font_name": "Inter",
+                "base_font_size": 16,
+                "base_pos": (152, 424),
+                "color": "rgb(57, 171, 142)",
+                "is_semibold": True
+            },
+            {
+                "key": "disk",
+                "text": "DISK : ",
+                "font_name": "Inter",
+                "base_font_size": 16,
+                "base_pos": (271, 424),
+                "color": "rgb(222, 96, 58)",
+                "is_semibold": True
+            }
+        ]
+        
+        for stat in stats:
+            self.elements.append({
+                "text": stat["text"],
+                "font_name": stat["font_name"],
+                "base_font_size": stat["base_font_size"],
+                "base_pos": stat["base_pos"],
+                "color": stat["color"],
+                "is_semibold": True,
+                "opacity": 1.0,
+                "label": None,
+                "is_dynamic": True
+            })
+            label = QLabel(stat["text"], self)
+            self.elements[-1]["label"] = label
+            self.stat_labels[stat["key"]] = label
+    
+    def update_stats(self):
+        """Update live CPU, RAM, and DISK stats"""
+        try:
+            # Get CPU usage
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            
+            # Get RAM usage
+            ram = psutil.virtual_memory()
+            ram_percent = ram.percent
+            
+            # Get DISK usage
+            disk = psutil.disk_usage('/')
+            disk_percent = disk.percent
+            
+            # Update labels with actual values
+            self.stat_labels["cpu"].setText(f"CPU: {cpu_percent:.1f}%")
+            self.stat_labels["ram"].setText(f"RAM: {ram_percent:.1f}%")
+            self.stat_labels["disk"].setText(f"DISK: {disk_percent:.1f}%")
+        except Exception as e:
+            print(f"Error updating stats: {e}")
+    
+    def update_layout(self):
+        """Update positions and font sizes based on current window dimensions"""
+        current_width = self.width()
+        current_height = self.height()
+        
+        scale_x = current_width / self.base_width
+        scale_y = current_height / self.base_height
+        
+        for elem in self.elements:
+            label = elem["label"]
+            
+            # Scale font size
+            scaled_font_size = int(elem["base_font_size"] * min(scale_x, scale_y))
+            font = QFont(elem["font_name"], scaled_font_size)
+            label.setFont(font)
+            
+            # Scale position
+            scaled_x = int(elem["base_pos"][0] * scale_x)
+            scaled_y = int(elem["base_pos"][1] * scale_y)
+            label.move(scaled_x, scaled_y)
+            
+            # Set color with opacity
+            if "is_semibold" in elem and elem.get("is_semibold"):
+                color = elem.get("color", "rgb(63, 72, 101)")
+                label.setStyleSheet(f"color: {color};")
+            else:
+                opacity_percent = int(elem["opacity"] * 100)
+                color = elem.get("color", "rgb(63, 72, 101)")
+                label.setStyleSheet(f"color: rgba(63, 72, 101, {elem['opacity']});")
+            
+            label.adjustSize()
+            label.show()
+    
+    def resizeEvent(self, event):
+        """Handle window resize events"""
+        super().resizeEvent(event)
+        self.update_layout()
