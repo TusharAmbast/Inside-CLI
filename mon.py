@@ -2,23 +2,19 @@ import sys
 import psutil
 from collections import deque
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
-from PySide6.QtCore import Signal, Qt, QTimer, QPoint
+from PySide6.QtCore import Signal, Qt, QTimer, QPoint, QRect
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygon
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
 import matplotlib
 matplotlib.use('Qt5Agg')
 
 from base_window import BaseMonitorWindow
-from scatter_plot import open_scatter_plot_window
-from anomaly import open_anomaly_window
+from scatter_plot import ScatterPlotWidget, ProcessDataProcessor
 
 
 class ClickableLabel(QLabel):
     """Custom QLabel that emits a signal when clicked"""
     clicked = Signal()
-    
+
     def mousePressEvent(self, event):
         self.clicked.emit()
 
@@ -27,248 +23,262 @@ class SystemUsageWindow(BaseMonitorWindow):
     def __init__(self):
         super().__init__(active_tab="SYSTEM USAGE")
         self.setWindowTitle("System Usage - Critique CLI")
-        
+        self.resize(700, 450)
+
         # Initialize data storage for plots (max 30 data points)
-        self.cpu_data = deque(maxlen=30)
-        self.ram_data = deque(maxlen=30)
+        self.cpu_data  = deque(maxlen=30)
+        self.ram_data  = deque(maxlen=30)
         self.disk_data = deque(maxlen=30)
-        
-        # Setup data collection timer
+
+        # ── Scatter plot widget (child, hidden until tab is active) ───
+        self._scatter = ScatterPlotWidget(parent=self)
+        self._scatter.hide()
+
+        # Data refresh timer for scatter (every 2 s)
+        self._scatter_timer = QTimer(self)
+        self._scatter_timer.timeout.connect(self._refresh_scatter)
+        self._scatter_timer.start(2000)
+
+        # Setup data collection timer (system usage)
         self.data_timer = QTimer()
         self.data_timer.timeout.connect(self.collect_usage_data)
-        self.data_timer.start(1000)  # Collect data every 1 second
-        
-        # Setup clickable buttons after layout is initialized
+        self.data_timer.start(1000)
+
         self.after_layout_setup()
-    
+
+    # ── scatter data ─────────────────────────────────────────────────
+
+    def _refresh_scatter(self):
+        try:
+            processed  = ProcessDataProcessor.process_pipeline()
+            fluid_data = ProcessDataProcessor.to_fluid_data(processed)
+            if fluid_data:
+                self._scatter.set_data(fluid_data)
+        except Exception as e:
+            print(f"[scatter refresh] {e}")
+
+    # ── tab geometry helpers ──────────────────────────────────────────
+
+    def _plot_rect(self) -> QRect:
+        """
+        Returns the QRect of the plot area using the same margin logic
+        as paintEvent, so the child widget sits exactly inside it.
+        """
+        w, h  = self.width(), self.height()
+        scale = min(w / self.base_width, h / self.base_height)
+        ml = int(50 * scale)
+        mr = int(50 * scale)
+        mt = int(100 * scale)
+        mb = int(60 * scale)
+        return QRect(ml, mt, w - ml - mr, h - mt - mb)
+
+    def _reposition_scatter(self):
+        """Move/resize the scatter widget to fill the current plot area."""
+        r = self._plot_rect()
+        self._scatter.setGeometry(r)
+
+    # ── tab switching ─────────────────────────────────────────────────
+
     def after_layout_setup(self):
-        """Setup clickable tab buttons after initial layout"""
-        # Find the tab button elements and make them clickable
         for elem in self.elements:
             if elem["text"] in ["SYSTEM USAGE", "SCATTER PLOT", "ANOMALY"]:
                 old_label = elem["label"]
-                
-                # Create new clickable label
                 clickable_label = ClickableLabel(elem["text"], self)
                 clickable_label.setFont(old_label.font())
                 clickable_label.setStyleSheet(old_label.styleSheet())
                 clickable_label.move(old_label.pos())
                 clickable_label.adjustSize()
                 clickable_label.show()
-                
-                # Update element with new clickable label
                 old_label.hide()
                 elem["label"] = clickable_label
-                
-                # Connect click signals
+
                 if elem["text"] == "SCATTER PLOT":
-                    clickable_label.clicked.connect(lambda: self.switch_tab("SCATTER PLOT"))
+                    clickable_label.clicked.connect(
+                        lambda: self.switch_tab("SCATTER PLOT"))
                 elif elem["text"] == "ANOMALY":
-                    clickable_label.clicked.connect(lambda: self.switch_tab("ANOMALY"))
+                    clickable_label.clicked.connect(
+                        lambda: self.switch_tab("ANOMALY"))
                 elif elem["text"] == "SYSTEM USAGE":
-                    clickable_label.clicked.connect(lambda: self.switch_tab("SYSTEM USAGE"))
-    
-    def collect_usage_data(self):
-        """Collect CPU, RAM, and DISK usage data"""
-        try:
-            cpu_percent = psutil.cpu_percent(interval=0)
-            ram_percent = psutil.virtual_memory().percent
-            disk_percent = psutil.disk_usage('/').percent
-            
-            self.cpu_data.append(cpu_percent)
-            self.ram_data.append(ram_percent)
-            self.disk_data.append(disk_percent)
-            
-            self.update()  # Trigger repaint
-        except Exception as e:
-            print(f"Error collecting usage data: {e}")
-    
+                    clickable_label.clicked.connect(
+                        lambda: self.switch_tab("SYSTEM USAGE"))
+
     def switch_tab(self, tab_name):
-        """Switch to a different tab and update UI"""
+        if self.active_tab == tab_name:
+            return
+
         self.active_tab = tab_name
-        
-        # Update opacity of all tab buttons
+
         for elem in self.elements:
             if elem["text"] in ["SYSTEM USAGE", "SCATTER PLOT", "ANOMALY"]:
-                if elem["text"] == tab_name:
-                    elem["opacity"] = 1.0  # Active tab
-                else:
-                    elem["opacity"] = 0.4  # Inactive tabs
-        
-        # Redraw the layout to update button appearances
+                elem["opacity"] = 1.0 if elem["text"] == tab_name else 0.4
+
+        # Show / hide scatter widget
+        if tab_name == "SCATTER PLOT":
+            self._reposition_scatter()
+            self._scatter.show()
+            self._scatter.raise_()
+            # Kick off an immediate data load if empty
+            if not self._scatter._data:
+                self._refresh_scatter()
+        else:
+            self._scatter.hide()
+
         self.update_layout()
-    
-    def draw_usage_plots(self, painter, graph_left, graph_right, graph_top, graph_bottom):
-        """Draw CPU, RAM, and DISK usage plots"""
+        self.update()
+
+    # ── system data collection ────────────────────────────────────────
+
+    def collect_usage_data(self):
+        try:
+            self.cpu_data.append(psutil.cpu_percent(interval=0))
+            self.ram_data.append(psutil.virtual_memory().percent)
+            self.disk_data.append(psutil.disk_usage('/').percent)
+            self.update()
+        except Exception as e:
+            print(f"Error collecting usage data: {e}")
+
+    # ── resize: keep scatter widget in sync ──────────────────────────
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.active_tab == "SCATTER PLOT":
+            self._reposition_scatter()
+
+    # ── drawing ───────────────────────────────────────────────────────
+
+    def draw_usage_plots(self, painter, graph_left, graph_right,
+                         graph_top, graph_bottom):
         if len(self.cpu_data) < 2:
-            return  # Need at least 2 points to draw a line
-        
-        graph_width = graph_right - graph_left
+            return
+
+        graph_width  = graph_right - graph_left
         graph_height = graph_bottom - graph_top
-        
-        # Helper function to convert data value to Y position
+
         def value_to_y(value):
             return graph_bottom - (graph_height * (value / 100))
-        
-        # Helper function to convert data index to X position
+
         def index_to_x(index):
-            # Index 0 is 30 seconds ago, latest index is now (0 seconds ago)
-            x_progress = index / 29.0  # 0 to 1
-            return graph_left + (graph_width * x_progress)
-        
-        # Draw CPU plot (filled area + line, rgb(225, 170, 30), opacity 0.6)
-        points = []
-        for i, value in enumerate(self.cpu_data):
-            x = index_to_x(i)
-            y = value_to_y(value)
-            points.append((int(x), int(y)))
-        
-        # Create filled polygon for CPU
-        polygon_points = points + [(p[0], int(graph_bottom)) for p in reversed(points)]
-        if len(polygon_points) > 2:
-            polygon = QPolygon([QPoint(p[0], p[1]) for p in polygon_points])
+            return graph_left + (graph_width * (index / 29.0))
+
+        # CPU — filled + line
+        points = [(int(index_to_x(i)), int(value_to_y(v)))
+                  for i, v in enumerate(self.cpu_data)]
+        poly_pts = points + [(p[0], int(graph_bottom)) for p in reversed(points)]
+        if len(poly_pts) > 2:
             painter.setBrush(QBrush(QColor(225, 170, 30, int(255 * 0.6))))
             painter.setPen(Qt.NoPen)
-            painter.drawPolygon(polygon)
-        
-        # Draw CPU line on top
+            painter.drawPolygon(QPolygon([QPoint(*p) for p in poly_pts]))
         pen = QPen(QColor(225, 170, 30, int(255 * 0.6)))
         pen.setWidth(2)
         painter.setPen(pen)
-        for i in range(len(points) - 1):
-            painter.drawLine(points[i][0], points[i][1], points[i+1][0], points[i+1][1])
-        
-        # Draw RAM plot (filled area + line, rgb(59, 169, 144), opacity 0.6)
-        points = []
-        for i, value in enumerate(self.ram_data):
-            x = index_to_x(i)
-            y = value_to_y(value)
-            points.append((int(x), int(y)))
-        
-        # Create filled polygon for RAM
-        polygon_points = points + [(p[0], int(graph_bottom)) for p in reversed(points)]
-        if len(polygon_points) > 2:
-            polygon = QPolygon([QPoint(p[0], p[1]) for p in polygon_points])
+        for i in range(len(points)-1):
+            painter.drawLine(*points[i], *points[i+1])
+
+        # RAM — filled + line
+        points = [(int(index_to_x(i)), int(value_to_y(v)))
+                  for i, v in enumerate(self.ram_data)]
+        poly_pts = points + [(p[0], int(graph_bottom)) for p in reversed(points)]
+        if len(poly_pts) > 2:
             painter.setBrush(QBrush(QColor(59, 169, 144, int(255 * 0.6))))
             painter.setPen(Qt.NoPen)
-            painter.drawPolygon(polygon)
-        
-        # Draw RAM line on top
+            painter.drawPolygon(QPolygon([QPoint(*p) for p in poly_pts]))
         pen = QPen(QColor(59, 169, 144, int(255 * 0.6)))
         pen.setWidth(2)
         painter.setPen(pen)
-        for i in range(len(points) - 1):
-            painter.drawLine(points[i][0], points[i][1], points[i+1][0], points[i+1][1])
-        
-        # Draw DISK plot (dashed line, rgb(222, 96, 58), width 2px)
+        for i in range(len(points)-1):
+            painter.drawLine(*points[i], *points[i+1])
+
+        # DISK — dashed line
         pen = QPen(QColor(222, 96, 58))
         pen.setWidth(2)
-        pen.setDashPattern([5, 5])  # Dashed pattern
+        pen.setDashPattern([5, 5])
         painter.setPen(pen)
-        
-        points = []
-        for i, value in enumerate(self.disk_data):
-            x = index_to_x(i)
-            y = value_to_y(value)
-            points.append((int(x), int(y)))
-        
-        for i in range(len(points) - 1):
-            painter.drawLine(points[i][0], points[i][1], points[i+1][0], points[i+1][1])
-    
+        points = [(int(index_to_x(i)), int(value_to_y(v)))
+                  for i, v in enumerate(self.disk_data)]
+        for i in range(len(points)-1):
+            painter.drawLine(*points[i], *points[i+1])
+
     def paintEvent(self, event):
-        """Draw the system usage graph"""
         super().paintEvent(event)
-        
-        # Get window dimensions for responsive design
-        width = self.width()
+
+        width  = self.width()
         height = self.height()
-        
-        # Calculate scale based on base dimensions
-        scale = min(width / self.base_width, height / self.base_height)
-        
-        # Fixed margins that scale with window
-        margin_left = int(50 * scale)
-        margin_right = int(50 * scale)
-        margin_top = int(100 * scale)
+        scale  = min(width / self.base_width, height / self.base_height)
+
+        margin_left   = int(50 * scale)
+        margin_right  = int(50 * scale)
+        margin_top    = int(100 * scale)
         margin_bottom = int(60 * scale)
-        
-        # Calculate graph dimensions to center it with maintained margins
-        graph_left = margin_left
-        graph_right = width - margin_right
-        graph_top = margin_top
+
+        graph_left   = margin_left
+        graph_right  = width  - margin_right
+        graph_top    = margin_top
         graph_bottom = height - margin_bottom
-        
+
         painter = QPainter(self)
-        
-        # Define consistent opacity for labels and lines
-        label_opacity = 0.6
-        line_opacity = 0.6
-        
-        # Draw horizontal grid lines and Y-axis labels
-        y_values = [100, 75, 50, 25]
-        for y_val in y_values:
-            # Calculate Y position (0% at bottom, 100% at top)
-            y_pos = graph_bottom - (graph_bottom - graph_top) * (y_val / 100) 
-            
-            # Draw horizontal line with consistent opacity
+
+        if self.active_tab == "SYSTEM USAGE":
+            label_opacity = 0.6
+            line_opacity  = 0.6
+
+            # Y-axis grid + labels
+            for y_val in [100, 75, 50, 25]:
+                y_pos = graph_bottom - (graph_bottom - graph_top) * (y_val / 100)
+                pen = QPen(QColor(63, 72, 101, int(255 * line_opacity)))
+                pen.setWidth(1)
+                painter.setPen(pen)
+                painter.drawLine(int(graph_left)+28, int(y_pos),
+                                 int(graph_right),   int(y_pos))
+                font_size = int(10 * scale)
+                font = QFont("Inter")
+                font.setPointSize(font_size)
+                font.setWeight(QFont.Weight.DemiBold)
+                painter.setFont(font)
+                painter.setPen(QColor(63, 72, 101, int(255 * label_opacity)))
+                painter.drawText(int(graph_left), int(y_pos - font_size/2),
+                                 int(40*scale), font_size, 0, f"{y_val}%")
+
+            # 0% baseline
             pen = QPen(QColor(63, 72, 101))
-            pen.setColor(QColor(63, 72, 101, int(255 * line_opacity)))
             pen.setWidth(1)
             painter.setPen(pen)
-            painter.drawLine(int(graph_left)+28, int(y_pos), int(graph_right), int(y_pos))
-            
-            # Draw Y-axis label with consistent opacity and semi-bold font
-            label_text = f"{y_val}%"
-            font_size = int(10 * scale)
+            painter.drawLine(int(graph_left), int(graph_bottom),
+                             int(graph_right), int(graph_bottom))
+
+            # X-axis ticks + labels
+            tick_height = int(5 * scale)
+            for x_val in range(30, -5, -5):
+                x_pos = graph_left + (graph_right-graph_left) * ((30-x_val)/30)
+                pen = QPen(QColor(63, 72, 101, 255))
+                pen.setWidth(1)
+                painter.setPen(pen)
+                painter.drawLine(int(x_pos), int(graph_bottom),
+                                 int(x_pos), int(graph_bottom-tick_height))
+                font_size = int(8 * scale)
+                font = QFont("Inter")
+                font.setPointSize(font_size)
+                painter.setFont(font)
+                painter.setPen(QColor(63, 72, 101, 255))
+                lw = int(20 * scale)
+                lx = int(x_pos - lw/2 + 6)
+                ly = int(graph_bottom - tick_height - font_size - 3*scale)
+                painter.drawText(lx, ly, lw, font_size, 0, str(x_val))
+
+            self.draw_usage_plots(painter, graph_left, graph_right,
+                                  graph_top, graph_bottom)
+
+        # SCATTER PLOT tab — ScatterPlotWidget child handles its own painting,
+        # nothing to draw here in paintEvent.
+
+        elif self.active_tab == "ANOMALY":
+            painter.setPen(QColor(63, 72, 101))
             font = QFont("Inter")
-            font.setPointSize(font_size)
-            font.setWeight(QFont.Weight.DemiBold)  # Semi-bold
+            font.setPointSize(int(16 * scale))
             painter.setFont(font)
-            painter.setPen(QColor(63, 72, 101, int(255 * label_opacity)))
-            # Position label at the start of the line, left-aligned to margin
-            label_x = int(graph_left)
-            label_y = int(y_pos - font_size / 2)
-            painter.drawText(label_x, label_y, int(40 * scale), font_size, 0, label_text)
-        
-        # Draw 0% line outside the loop with 100% opacity
-        y_pos = graph_bottom  # 0% is at the bottom
-        pen = QPen(QColor(63, 72, 101))
-        pen.setColor(QColor(63, 72, 101, int(255 * 1.0)))  # 100% opacity for 0% line
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.drawLine(int(graph_left), int(y_pos), int(graph_right), int(y_pos))
-        
-        # Draw X-axis and tick marks
-        x_values = list(range(30, -5, -5))  # [30, 25, 20, 15, 10, 5] - removed 0
-        tick_height = int(5 * scale)
-        
-        for i, x_val in enumerate(x_values):
-            # Calculate X position
-            x_pos = graph_left + (graph_right - graph_left) * ((30 - x_val) / 30)
-            
-            # Draw small upward tick mark (5px height)
-            pen = QPen(QColor(63, 72, 101, 255))
-            pen.setWidth(1)
-            painter.setPen(pen)
-            painter.drawLine(int(x_pos), int(graph_bottom), int(x_pos), int(graph_bottom - tick_height))
-            
-            # Draw X-axis label ABOVE the tick marks with 100% opacity, centered at vertical indicator
-            label_text = str(x_val)
-            font_size = int(8 * scale)
-            font = QFont("Inter")
-            font.setPointSize(font_size)
-            painter.setFont(font)
-            painter.setPen(QColor(63, 72, 101, 255))
-            # Center the label at x_pos
-            label_width = int(20 * scale)
-            label_x = int((x_pos - label_width / 2)+6)
-            # Position label above the tick marks
-            label_y = int(graph_bottom - tick_height - font_size - 3 * scale)
-            painter.drawText(label_x, label_y, label_width, font_size, 0, label_text)
-        
-        # Draw usage plots inside the graph area
-        self.draw_usage_plots(painter, graph_left, graph_right, graph_top, graph_bottom)
-        
+            painter.drawText(graph_left, graph_top,
+                             graph_right-graph_left, graph_bottom-graph_top,
+                             Qt.AlignCenter, "ANOMALY\n(To be implemented)")
+
         painter.end()
 
 

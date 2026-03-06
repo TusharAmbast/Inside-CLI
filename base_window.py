@@ -35,7 +35,7 @@ class BaseMonitorWindow(QMainWindow):
             {
                 "text": "Inside Cli",
                 "font_name": "Abril Fatface",
-                "base_font_size": 36,
+                "base_font_size": 40,
                 "base_pos": (650, 22),
                 "color": "rgb(63, 72, 101)",
                 "opacity": 1.0,
@@ -97,7 +97,7 @@ class BaseMonitorWindow(QMainWindow):
         stats = [
             {
                 "key": "cpu",
-                "text": "CPU : ",
+                "text": "CPU :             ",
                 "font_name": "Inter",
                 "base_font_size": 16,
                 "base_pos": (50, 410),
@@ -107,7 +107,7 @@ class BaseMonitorWindow(QMainWindow):
             },
             {
                 "key": "ram",
-                "text": "RAM : ",
+                "text": "RAM :             ",
                 "font_name": "Inter",
                 "base_font_size": 16,
                 "base_pos": (180, 410),
@@ -117,7 +117,7 @@ class BaseMonitorWindow(QMainWindow):
             },
             {
                 "key": "disk",
-                "text": "DISK : ",
+                "text": "DISK :              ",
                 "font_name": "Inter",
                 "base_font_size": 16,
                 "base_pos": (310, 410),
