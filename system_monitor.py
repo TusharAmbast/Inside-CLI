@@ -90,7 +90,7 @@ class ExplanationPanel(QFrame):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
         
-        # Explanation text area (scrollable)
+        #Explanation text area (scrollable)
         self.text_area = QTextEdit()
         self.text_area.setReadOnly(True)
         self.text_area.setStyleSheet("""
