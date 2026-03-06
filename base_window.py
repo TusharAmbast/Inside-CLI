@@ -1,5 +1,4 @@
 import os
-import platform
 import psutil
 from PySide6.QtWidgets import QMainWindow, QLabel
 from PySide6.QtCore import Qt, QTimer
@@ -14,7 +13,7 @@ class BaseMonitorWindow(QMainWindow):
         self.setStyleSheet("background-color: #FEF3D7; QMainWindow { background-color: #FEF3D7; }")
         
         # Base dimensions for ratio calculations
-        self.base_width = 700
+        self.base_width = 750
         self.base_height = 450
         
         # Track which tab is active
@@ -37,10 +36,12 @@ class BaseMonitorWindow(QMainWindow):
                 "text": "Inside Cli",
                 "font_name": "Abril Fatface",
                 "base_font_size": 36,
-                "base_pos": (513, 22),
+                "base_pos": (650, 22),
                 "color": "rgb(63, 72, 101)",
                 "opacity": 1.0,
-                "label": None
+                "label": None,
+                "align_right": True,
+                "right_margin": 50
             },
             {
                 "text": "SYSTEM USAGE",
@@ -99,27 +100,30 @@ class BaseMonitorWindow(QMainWindow):
                 "text": "CPU : ",
                 "font_name": "Inter",
                 "base_font_size": 16,
-                "base_pos": (32, 424),
+                "base_pos": (50, 410),
                 "color": "rgb(255, 170, 30)",
-                "is_semibold": True
+                "is_semibold": True,
+                "bottom_margin": 20
             },
             {
                 "key": "ram",
                 "text": "RAM : ",
                 "font_name": "Inter",
                 "base_font_size": 16,
-                "base_pos": (152, 424),
+                "base_pos": (180, 410),
                 "color": "rgb(57, 171, 142)",
-                "is_semibold": True
+                "is_semibold": True,
+                "bottom_margin": 20
             },
             {
                 "key": "disk",
                 "text": "DISK : ",
                 "font_name": "Inter",
                 "base_font_size": 16,
-                "base_pos": (271, 424),
+                "base_pos": (310, 410),
                 "color": "rgb(222, 96, 58)",
-                "is_semibold": True
+                "is_semibold": True,
+                "bottom_margin": 20
             }
         ]
         
@@ -176,9 +180,17 @@ class BaseMonitorWindow(QMainWindow):
             font = QFont(elem["font_name"], scaled_font_size)
             label.setFont(font)
             
-            # Scale position
-            scaled_x = int(elem["base_pos"][0] * scale_x)
-            scaled_y = int(elem["base_pos"][1] * scale_y)
+            # Handle right-aligned elements
+            if elem.get("align_right"):
+                label.adjustSize()  # Get the width of the label
+                right_margin = int(elem.get("right_margin", 50) * min(scale_x, scale_y))
+                scaled_x = current_width - right_margin - label.width()
+                scaled_y = int(elem["base_pos"][1] * scale_y)
+            else:
+                # Scale position normally
+                scaled_x = int(elem["base_pos"][0] * scale_x)
+                scaled_y = int(elem["base_pos"][1] * scale_y)
+            
             label.move(scaled_x, scaled_y)
             
             # Set color with opacity
