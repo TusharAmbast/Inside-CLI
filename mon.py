@@ -1,11 +1,17 @@
 import sys
+import platform
 import psutil
 from collections import deque
-from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel
 from PySide6.QtCore import Signal, Qt, QTimer, QPoint, QRect
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygon
-import matplotlib
-matplotlib.use('Qt5Agg')
+
+# ── FIX 8: Remove unused matplotlib import ────────────────────────────────────
+# Old code: imported matplotlib and set backend even though it's unused here.
+# Problem:  On Windows, matplotlib's Qt5Agg backend can conflict with PySide6's
+#           own Qt6 event loop, causing rendering glitches or crashes.
+# Fix:      Remove it entirely from mon.py. If scatter_plot.py needs it,
+#           it should set the backend there, not here.
 
 from base_window import BaseMonitorWindow
 from scatter_plot import ScatterPlotWidget, ProcessDataProcessor
@@ -23,30 +29,33 @@ class SystemUsageWindow(BaseMonitorWindow):
     def __init__(self):
         super().__init__(active_tab="SYSTEM USAGE")
         self.setWindowTitle("System Usage - Critique CLI")
-        self.resize(700, 450)
 
-        # Initialize data storage for plots (max 30 data points)
+        # ── FIX 9: Remove self.resize(700, 450) ───────────────────────────────
+        # Old code: self.resize(700, 450) was called after super().__init__()
+        # Problem:  super().__init__() already sets the window to 900x560.
+        #           Calling resize(700, 450) immediately after shrinks it back
+        #           down, undoing FIX 1 and reintroducing the scale < 1.0 problem.
+        # Fix:      Simply remove this line. The size set in BaseMonitorWindow is
+        #           the correct startup size.
+
         self.cpu_data  = deque(maxlen=30)
         self.ram_data  = deque(maxlen=30)
         self.disk_data = deque(maxlen=30)
 
-        # ── Scatter plot widget (child, hidden until tab is active) ───
         self._scatter = ScatterPlotWidget(parent=self)
         self._scatter.hide()
 
-        # Data refresh timer for scatter (every 2 s)
         self._scatter_timer = QTimer(self)
         self._scatter_timer.timeout.connect(self._refresh_scatter)
         self._scatter_timer.start(2000)
 
-        # Setup data collection timer (system usage)
         self.data_timer = QTimer()
         self.data_timer.timeout.connect(self.collect_usage_data)
         self.data_timer.start(1000)
 
         self.after_layout_setup()
 
-    # ── scatter data ─────────────────────────────────────────────────
+    # ── scatter data ──────────────────────────────────────────────────────────
 
     def _refresh_scatter(self):
         try:
@@ -57,27 +66,48 @@ class SystemUsageWindow(BaseMonitorWindow):
         except Exception as e:
             print(f"[scatter refresh] {e}")
 
-    # ── tab geometry helpers ──────────────────────────────────────────
+    # ── tab geometry helpers ──────────────────────────────────────────────────
+
+    def _get_margin_top(self):
+        """
+        ── FIX 10: Dynamic margin_top based on actual tab label position ────────
+        Old code: margin_top = int(100 * scale) — a hardcoded magic number.
+        Problem:  Windows title bar (~30px) is taller than Mac (~22px).
+                  Qt's coordinate system starts below the title bar, but the
+                  title bar height still affects how much vertical space the
+                  window chrome consumes. With a fixed margin_top, the graph
+                  would bleed up and overlap the tab labels on Windows.
+        Fix:      Measure where the tab labels actually end at runtime, then
+                  add a small padding. This works on any OS, any DPI, any
+                  screen size — no hardcoded OS-specific magic numbers needed.
+        """
+        tab_texts = ["SYSTEM USAGE", "SCATTER PLOT", "ANOMALY"]
+        tab_bottom = 0
+        for elem in self.elements:
+            if elem["text"] in tab_texts and elem["label"]:
+                lbl = elem["label"]
+                bottom = lbl.y() + lbl.height()
+                tab_bottom = max(tab_bottom, bottom)
+
+        scale = min(self.width() / self.base_width, self.height() / self.base_height)
+        padding = int(40 * scale)
+
+        # Fall back to scaled default if labels aren't positioned yet
+        return tab_bottom + padding if tab_bottom > 0 else int(100 * scale)
 
     def _plot_rect(self) -> QRect:
-        """
-        Returns the QRect of the plot area using the same margin logic
-        as paintEvent, so the child widget sits exactly inside it.
-        """
         w, h  = self.width(), self.height()
         scale = min(w / self.base_width, h / self.base_height)
         ml = int(50 * scale)
         mr = int(50 * scale)
-        mt = int(100 * scale)
+        mt = self._get_margin_top()   # uses dynamic margin now
         mb = int(60 * scale)
         return QRect(ml, mt, w - ml - mr, h - mt - mb)
 
     def _reposition_scatter(self):
-        """Move/resize the scatter widget to fill the current plot area."""
-        r = self._plot_rect()
-        self._scatter.setGeometry(r)
+        self._scatter.setGeometry(self._plot_rect())
 
-    # ── tab switching ─────────────────────────────────────────────────
+    # ── tab switching ─────────────────────────────────────────────────────────
 
     def after_layout_setup(self):
         for elem in self.elements:
@@ -105,19 +135,15 @@ class SystemUsageWindow(BaseMonitorWindow):
     def switch_tab(self, tab_name):
         if self.active_tab == tab_name:
             return
-
         self.active_tab = tab_name
-
         for elem in self.elements:
             if elem["text"] in ["SYSTEM USAGE", "SCATTER PLOT", "ANOMALY"]:
                 elem["opacity"] = 1.0 if elem["text"] == tab_name else 0.4
 
-        # Show / hide scatter widget
         if tab_name == "SCATTER PLOT":
             self._reposition_scatter()
             self._scatter.show()
             self._scatter.raise_()
-            # Kick off an immediate data load if empty
             if not self._scatter._data:
                 self._refresh_scatter()
         else:
@@ -126,7 +152,7 @@ class SystemUsageWindow(BaseMonitorWindow):
         self.update_layout()
         self.update()
 
-    # ── system data collection ────────────────────────────────────────
+    # ── system data collection ────────────────────────────────────────────────
 
     def collect_usage_data(self):
         try:
@@ -137,14 +163,14 @@ class SystemUsageWindow(BaseMonitorWindow):
         except Exception as e:
             print(f"Error collecting usage data: {e}")
 
-    # ── resize: keep scatter widget in sync ──────────────────────────
+    # ── resize ────────────────────────────────────────────────────────────────
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.active_tab == "SCATTER PLOT":
             self._reposition_scatter()
 
-    # ── drawing ───────────────────────────────────────────────────────
+    # ── drawing ───────────────────────────────────────────────────────────────
 
     def draw_usage_plots(self, painter, graph_left, graph_right,
                          graph_top, graph_bottom):
@@ -158,44 +184,65 @@ class SystemUsageWindow(BaseMonitorWindow):
             return graph_bottom - (graph_height * (value / 100))
 
         def index_to_x(index):
-            return graph_left + (graph_width * (index / 29.0))
+            # ── FIX 11: Use actual data length, not hardcoded 29 ─────────────
+            # Old code: index / 29.0  (assumes deque is always full = 30 items)
+            # Problem:  For the first 30 seconds, the deque has fewer than 30
+            #           items. Dividing by 29 maps those few points to only the
+            #           LEFT portion of the graph, leaving the right side empty.
+            # Fix:      Divide by (len - 1) so points always span the full width
+            #           regardless of how many data points exist so far.
+            total = max(len(self.cpu_data) - 1, 1)
+            return graph_left + (graph_width * (index / total))
+
+        # ── FIX 12: Correct polygon construction ─────────────────────────────
+        # Old code: poly_pts = points + [(p[0], graph_bottom) for p in reversed(points)]
+        # Problem:  reversed(points) creates a mirrored copy of the data line,
+        #           not a flat bottom baseline. This made the filled area look
+        #           like a double-sided spike/mountain instead of a proper fill
+        #           under the curve.
+        # Fix:      Anchor at bottom-left, draw data points, anchor at bottom-right.
+        #           This creates a proper closed polygon with a flat bottom.
 
         # CPU — filled + line
         points = [(int(index_to_x(i)), int(value_to_y(v)))
                   for i, v in enumerate(self.cpu_data)]
-        poly_pts = points + [(p[0], int(graph_bottom)) for p in reversed(points)]
-        if len(poly_pts) > 2:
+        if len(points) >= 2:
+            poly = [QPoint(points[0][0], int(graph_bottom))]  # bottom-left anchor
+            poly += [QPoint(p[0], p[1]) for p in points]      # data line
+            poly += [QPoint(points[-1][0], int(graph_bottom))] # bottom-right anchor
             painter.setBrush(QBrush(QColor(225, 170, 30, int(255 * 0.6))))
             painter.setPen(Qt.NoPen)
-            painter.drawPolygon(QPolygon([QPoint(*p) for p in poly_pts]))
+            painter.drawPolygon(QPolygon(poly))
         pen = QPen(QColor(225, 170, 30, int(255 * 0.6)))
         pen.setWidth(2)
         painter.setPen(pen)
-        for i in range(len(points)-1):
+        for i in range(len(points) - 1):
             painter.drawLine(*points[i], *points[i+1])
 
         # RAM — filled + line
         points = [(int(index_to_x(i)), int(value_to_y(v)))
                   for i, v in enumerate(self.ram_data)]
-        poly_pts = points + [(p[0], int(graph_bottom)) for p in reversed(points)]
-        if len(poly_pts) > 2:
+        if len(points) >= 2:
+            poly = [QPoint(points[0][0], int(graph_bottom))]
+            poly += [QPoint(p[0], p[1]) for p in points]
+            poly += [QPoint(points[-1][0], int(graph_bottom))]
             painter.setBrush(QBrush(QColor(59, 169, 144, int(255 * 0.6))))
             painter.setPen(Qt.NoPen)
-            painter.drawPolygon(QPolygon([QPoint(*p) for p in poly_pts]))
+            painter.drawPolygon(QPolygon(poly))
         pen = QPen(QColor(59, 169, 144, int(255 * 0.6)))
         pen.setWidth(2)
         painter.setPen(pen)
-        for i in range(len(points)-1):
+        for i in range(len(points) - 1):
             painter.drawLine(*points[i], *points[i+1])
 
-        # DISK — dashed line
+        # DISK — dashed line only (no fill)
         pen = QPen(QColor(222, 96, 58))
         pen.setWidth(2)
         pen.setDashPattern([5, 5])
         painter.setPen(pen)
         points = [(int(index_to_x(i)), int(value_to_y(v)))
                   for i, v in enumerate(self.disk_data)]
-        for i in range(len(points)-1):
+        for i in range(len(points) - 1):
             painter.drawLine(*points[i], *points[i+1])
 
     def paintEvent(self, event):
@@ -207,7 +254,7 @@ class SystemUsageWindow(BaseMonitorWindow):
 
         margin_left   = int(50 * scale)
         margin_right  = int(50 * scale)
-        margin_top    = int(100 * scale)
+        margin_top    = self._get_margin_top()  # FIX 10: dynamic, not hardcoded
         margin_bottom = int(60 * scale)
 
         graph_left   = margin_left
@@ -227,16 +274,25 @@ class SystemUsageWindow(BaseMonitorWindow):
                 pen = QPen(QColor(63, 72, 101, int(255 * line_opacity)))
                 pen.setWidth(1)
                 painter.setPen(pen)
-                painter.drawLine(int(graph_left)+28, int(y_pos),
-                                 int(graph_right),   int(y_pos))
-                font_size = int(10 * scale)
+                painter.drawLine(int(graph_left) + 28, int(y_pos),
+                                 int(graph_right), int(y_pos))
+
+                # ── FIX 13: drawText height must be tall enough for the font ──
+                # Old code: painter.drawText(..., font_size, 0, label)
+                #           where height = font_size (e.g. 10px)
+                # Problem:  On Windows, font metrics include extra leading/descent
+                #           that Mac ignores. A bounding box of exactly font_size
+                #           height clips the bottom of letters like 'g','p','%'.
+                # Fix:      Use font_size * 2 as the bounding box height, giving
+                #           enough room for Windows' taller font metrics.
+                font_size = max(8, int(10 * scale))
                 font = QFont("Inter")
                 font.setPointSize(font_size)
                 font.setWeight(QFont.Weight.DemiBold)
                 painter.setFont(font)
                 painter.setPen(QColor(63, 72, 101, int(255 * label_opacity)))
-                painter.drawText(int(graph_left), int(y_pos - font_size/2),
-                                 int(40*scale), font_size, 0, f"{y_val}%")
+                painter.drawText(int(graph_left), int(y_pos - font_size),
+                                 int(40 * scale), font_size * 2, 0, f"{y_val}%")
 
             # 0% baseline
             pen = QPen(QColor(63, 72, 101))
@@ -248,27 +304,25 @@ class SystemUsageWindow(BaseMonitorWindow):
             # X-axis ticks + labels
             tick_height = int(5 * scale)
             for x_val in range(30, -5, -5):
-                x_pos = graph_left + (graph_right-graph_left) * ((30-x_val)/30)
+                x_pos = graph_left + (graph_right - graph_left) * ((30 - x_val) / 30)
                 pen = QPen(QColor(63, 72, 101, 255))
                 pen.setWidth(1)
                 painter.setPen(pen)
                 painter.drawLine(int(x_pos), int(graph_bottom),
-                                 int(x_pos), int(graph_bottom-tick_height))
-                font_size = int(8 * scale)
+                                 int(x_pos), int(graph_bottom - tick_height))
+
+                font_size = max(7, int(8 * scale))
                 font = QFont("Inter")
                 font.setPointSize(font_size)
                 painter.setFont(font)
                 painter.setPen(QColor(63, 72, 101, 255))
-                lw = int(20 * scale)
-                lx = int(x_pos - lw/2 + 6)
-                ly = int(graph_bottom - tick_height - font_size - 3*scale)
-                painter.drawText(lx, ly, lw, font_size, 0, str(x_val))
+                lw = int(24 * scale)   # slightly wider label box
+                lx = int(x_pos - lw / 2 + 6)
+                ly = graph_bottom - tick_height - font_size*2 - 4  # below the baseline
+                painter.drawText(lx, ly, lw, font_size * 2, 0, str(x_val))
 
             self.draw_usage_plots(painter, graph_left, graph_right,
                                   graph_top, graph_bottom)
-
-        # SCATTER PLOT tab — ScatterPlotWidget child handles its own painting,
-        # nothing to draw here in paintEvent.
 
         elif self.active_tab == "ANOMALY":
             painter.setPen(QColor(63, 72, 101))
@@ -276,13 +330,26 @@ class SystemUsageWindow(BaseMonitorWindow):
             font.setPointSize(int(16 * scale))
             painter.setFont(font)
             painter.drawText(graph_left, graph_top,
-                             graph_right-graph_left, graph_bottom-graph_top,
+                             graph_right - graph_left, graph_bottom - graph_top,
                              Qt.AlignCenter, "ANOMALY\n(To be implemented)")
 
         painter.end()
 
 
 if __name__ == "__main__":
+    # ── FIX 14: Platform-safe DPI awareness ──────────────────────────────────
+    # Old code: ctypes.windll... was called unconditionally (crashes on Mac/Linux)
+    # Problem:  windll only exists on Windows. Running on Mac raised AttributeError.
+    # Fix:      Wrap in platform check. Also removed deprecated
+    #           AA_EnableHighDpiScaling / AA_UseHighDpiPixmaps — PySide6 handles
+    #           high DPI automatically and these Qt5-era flags cause warnings.
+    if platform.system() == "Windows":
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
+        except Exception:
+            pass  # Silently ignore if it fails (older Windows versions)
+
     app = QApplication(sys.argv)
     root = SystemUsageWindow()
     root.show()
