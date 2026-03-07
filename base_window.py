@@ -10,28 +10,14 @@ class BaseMonitorWindow(QMainWindow):
     def __init__(self, active_tab="SYSTEM USAGE"):
         super().__init__()
 
-        # ── FIX 1: Larger startup size so scale starts at 1.0, not 0.93 ──────
-        # Old code: setGeometry(100, 100, 700, 450)
-        # Problem:  base_width was 750 but window opened at 700 wide.
-        #           scale = 700/750 = 0.93, so EVERYTHING was slightly squished
-        #           from the very first frame. On Mac this was barely noticeable,
-        #           but on Windows the smaller scale pushed labels into each other
-        #           and caused text clipping.
-        # Fix:      Match the startup size to base dimensions so scale = 1.0
-        #           at launch. Everything is positioned exactly as designed.
+        
         self.setGeometry(100, 100, 900, 560)
         self.setMinimumSize(750, 450)  # Prevent layout collapse when resizing small
 
         self.setWindowFlags(Qt.CustomizeWindowHint | Qt.WindowCloseButtonHint | Qt.WindowMinMaxButtonsHint)
         self.setStyleSheet("background-color: #FEF3D7; QMainWindow { background-color: #FEF3D7; }")
 
-        # ── FIX 2: base dimensions match the new startup size ─────────────────
-        # Old code: base_width=750, base_height=450
-        # Problem:  These were the "design dimensions" used to calculate scale.
-        #           When the window opened smaller than base_width, scale < 1.0
-        #           and everything was compressed, especially on Windows where
-        #           font metrics differ.
-        # Fix:      base dimensions = startup size, so scale always starts at 1.0
+        
         self.base_width = 900
         self.base_height = 560
 
@@ -108,20 +94,7 @@ class BaseMonitorWindow(QMainWindow):
         """Add CPU, RAM, and DISK stats at the bottom with live updates"""
         self.stat_labels = {}
 
-        # ── FIX 3: Wider spacing between stat labels ──────────────────────────
-        # Old code: base_pos x values were 50, 180, 310
-        # Problem:  At scale < 1.0 these positions were too close together.
-        #           Windows fonts (Segoe UI fallback) are slightly wider than
-        #           Mac fonts, so "CPU: 23.6%" took more horizontal space and
-        #           overlapped into the RAM label area.
-        # Fix:      Spread them out more (50, 230, 430) so there's enough room
-        #           even with wider Windows font rendering.
-        #
-        # Also FIX 4: base_pos y changed from 410 to 510 to match new base_height
-        # Old code: y=410 (designed for 450px tall window)
-        # Problem:  With base_height now 560, y=410 placed labels in the middle
-        #           of the graph instead of near the bottom.
-        # Fix:      y=510 keeps labels near the bottom of the 560px design height.
+        
         stats = [
             {
                 "key": "cpu",
@@ -179,13 +152,7 @@ class BaseMonitorWindow(QMainWindow):
             self.stat_labels["ram"].setText(f"RAM: {ram_percent:.1f}%")
             self.stat_labels["disk"].setText(f"DISK: {disk_percent:.1f}%")
 
-            # ── FIX 5: Re-run layout after text changes ────────────────────────
-            # Old code: just setText, no layout update
-            # Problem:  On Windows, after setText the label width changes but the
-            #           position isn't recalculated, so updated text gets clipped.
-            #           Mac is more forgiving because it redraws more aggressively.
-            # Fix:      Call update_layout() so positions are recalculated with
-            #           the new text widths.
+           
             self.update_layout()
         except Exception as e:
             print(f"Error updating stats: {e}")
@@ -206,31 +173,14 @@ class BaseMonitorWindow(QMainWindow):
             font = QFont(elem["font_name"], scaled_font_size)
             label.setFont(font)
 
-            # ── FIX 6: Set style BEFORE adjustSize() ──────────────────────────
-            # Old code: setStyleSheet() was called AFTER adjustSize()
-            # Problem:  On Windows, the stylesheet affects font rendering which
-            #           affects how wide the text is. If you measure the label
-            #           before applying the style, you get the wrong width.
-            #           This caused labels to be positioned incorrectly because
-            #           label.width() returned a stale/wrong value.
-            # Fix:      Apply font + style first, THEN measure, THEN position.
+            
             if elem.get("is_semibold"):
                 color = elem.get("color", "rgb(63, 72, 101)")
                 label.setStyleSheet(f"color: {color};")
             else:
                 label.setStyleSheet(f"color: rgba(63, 72, 101, {elem['opacity']});")
 
-            # ── FIX 7: adjustSize() ONCE, BEFORE position calculation ─────────
-            # Old code: adjustSize() was called twice — once inside the
-            #           align_right block and once at the very end.
-            # Problem:  The second call at the end happened AFTER label.move(),
-            #           which on Windows can trigger a geometry recalculation
-            #           that nudges the label slightly off its intended position.
-            #           Also, for non-right-aligned elements, adjustSize() wasn't
-            #           called before position math at all, so label.width() was
-            #           unreliable when needed.
-            # Fix:      One single adjustSize() here — after font+style, before
-            #           any position math.
+            
             label.adjustSize()
 
             # Now position is calculated with accurate label dimensions

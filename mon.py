@@ -6,12 +6,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 from PySide6.QtCore import Signal, Qt, QTimer, QPoint, QRect
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygon
 
-# ── FIX 8: Remove unused matplotlib import ────────────────────────────────────
-# Old code: imported matplotlib and set backend even though it's unused here.
-# Problem:  On Windows, matplotlib's Qt5Agg backend can conflict with PySide6's
-#           own Qt6 event loop, causing rendering glitches or crashes.
-# Fix:      Remove it entirely from mon.py. If scatter_plot.py needs it,
-#           it should set the backend there, not here.
+
 
 from base_window import BaseMonitorWindow
 from scatter_plot import ScatterPlotWidget, ProcessDataProcessor
@@ -30,13 +25,7 @@ class SystemUsageWindow(BaseMonitorWindow):
         super().__init__(active_tab="SYSTEM USAGE")
         self.setWindowTitle("System Usage - Critique CLI")
 
-        # ── FIX 9: Remove self.resize(700, 450) ───────────────────────────────
-        # Old code: self.resize(700, 450) was called after super().__init__()
-        # Problem:  super().__init__() already sets the window to 900x560.
-        #           Calling resize(700, 450) immediately after shrinks it back
-        #           down, undoing FIX 1 and reintroducing the scale < 1.0 problem.
-        # Fix:      Simply remove this line. The size set in BaseMonitorWindow is
-        #           the correct startup size.
+        
 
         self.cpu_data  = deque(maxlen=30)
         self.ram_data  = deque(maxlen=30)
@@ -69,18 +58,7 @@ class SystemUsageWindow(BaseMonitorWindow):
     # ── tab geometry helpers ──────────────────────────────────────────────────
 
     def _get_margin_top(self):
-        """
-        ── FIX 10: Dynamic margin_top based on actual tab label position ────────
-        Old code: margin_top = int(100 * scale) — a hardcoded magic number.
-        Problem:  Windows title bar (~30px) is taller than Mac (~22px).
-                  Qt's coordinate system starts below the title bar, but the
-                  title bar height still affects how much vertical space the
-                  window chrome consumes. With a fixed margin_top, the graph
-                  would bleed up and overlap the tab labels on Windows.
-        Fix:      Measure where the tab labels actually end at runtime, then
-                  add a small padding. This works on any OS, any DPI, any
-                  screen size — no hardcoded OS-specific magic numbers needed.
-        """
+        
         tab_texts = ["SYSTEM USAGE", "SCATTER PLOT", "ANOMALY"]
         tab_bottom = 0
         for elem in self.elements:
@@ -184,24 +162,11 @@ class SystemUsageWindow(BaseMonitorWindow):
             return graph_bottom - (graph_height * (value / 100))
 
         def index_to_x(index):
-            # ── FIX 11: Use actual data length, not hardcoded 29 ─────────────
-            # Old code: index / 29.0  (assumes deque is always full = 30 items)
-            # Problem:  For the first 30 seconds, the deque has fewer than 30
-            #           items. Dividing by 29 maps those few points to only the
-            #           LEFT portion of the graph, leaving the right side empty.
-            # Fix:      Divide by (len - 1) so points always span the full width
-            #           regardless of how many data points exist so far.
+            
             total = max(len(self.cpu_data) - 1, 1)
             return graph_left + (graph_width * (index / total))
 
-        # ── FIX 12: Correct polygon construction ─────────────────────────────
-        # Old code: poly_pts = points + [(p[0], graph_bottom) for p in reversed(points)]
-        # Problem:  reversed(points) creates a mirrored copy of the data line,
-        #           not a flat bottom baseline. This made the filled area look
-        #           like a double-sided spike/mountain instead of a proper fill
-        #           under the curve.
-        # Fix:      Anchor at bottom-left, draw data points, anchor at bottom-right.
-        #           This creates a proper closed polygon with a flat bottom.
+        
 
         # CPU — filled + line
         points = [(int(index_to_x(i)), int(value_to_y(v)))
@@ -277,14 +242,7 @@ class SystemUsageWindow(BaseMonitorWindow):
                 painter.drawLine(int(graph_left) + 28, int(y_pos),
                                  int(graph_right), int(y_pos))
 
-                # ── FIX 13: drawText height must be tall enough for the font ──
-                # Old code: painter.drawText(..., font_size, 0, label)
-                #           where height = font_size (e.g. 10px)
-                # Problem:  On Windows, font metrics include extra leading/descent
-                #           that Mac ignores. A bounding box of exactly font_size
-                #           height clips the bottom of letters like 'g','p','%'.
-                # Fix:      Use font_size * 2 as the bounding box height, giving
-                #           enough room for Windows' taller font metrics.
+                
                 font_size = max(8, int(10 * scale))
                 font = QFont("Inter")
                 font.setPointSize(font_size)
@@ -337,12 +295,7 @@ class SystemUsageWindow(BaseMonitorWindow):
 
 
 if __name__ == "__main__":
-    # ── FIX 14: Platform-safe DPI awareness ──────────────────────────────────
-    # Old code: ctypes.windll... was called unconditionally (crashes on Mac/Linux)
-    # Problem:  windll only exists on Windows. Running on Mac raised AttributeError.
-    # Fix:      Wrap in platform check. Also removed deprecated
-    #           AA_EnableHighDpiScaling / AA_UseHighDpiPixmaps — PySide6 handles
-    #           high DPI automatically and these Qt5-era flags cause warnings.
+    
     if platform.system() == "Windows":
         import ctypes
         try:
