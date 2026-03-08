@@ -1,275 +1,598 @@
 import sys
+import time
 import psutil
-from collections import deque
-from PySide6.QtWidgets import QApplication, QLabel
-from PySide6.QtCore import QPoint, QTimer, Qt, Signal
-from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygon
+import pandas as pd
+
+from PySide6.QtWidgets import (
+    QApplication, QLabel, QFrame, QVBoxLayout, QHBoxLayout,
+    QPushButton, QScrollArea, QWidget
+)
+from PySide6.QtCore import QTimer, Qt, Signal, QThread, QObject, Slot
+from PySide6.QtGui import QColor, QFont
+
 from base_window import BaseMonitorWindow
 
+
+# ==============================================================================
+# CLICKABLE LABEL (for tab navigation)
+# ==============================================================================
 
 class ClickableLabel(QLabel):
     """Custom QLabel that emits a signal when clicked"""
     clicked = Signal()
-    
+
     def mousePressEvent(self, event):
         self.clicked.emit()
 
+
+# ==============================================================================
+# BACKGROUND WORKER — anomaly detection only
+# ==============================================================================
+
+class AnomalyWorker(QObject):
+    """
+    Runs in a separate QThread. Collects process data every 500ms,
+    checks 3 anomaly conditions, and emits a list of anomalies.
+    """
+    anomaliesFound = Signal(list)
+    killProcess    = Signal(int)
+
+    # How many top CPU processes to watch
+    TOP_X = 5
+    # How long (seconds) CPU must stay high to count as "sustained"
+    SUSTAIN_TIME = 10
+
+    # Expected CPU % per process category
+    EXPECTED_CPU = {
+        'browser':     30,
+        'video':       80,
+        'screensaver':  5,
+        'default':     20,
+    }
+
+    # ------------------------------------------------------------------
+    # OPTION 3: Process importance classification
+    # ------------------------------------------------------------------
+
+    # Layer 1 — hardcoded whitelist of known critical system processes
+    # (cross-platform: covers Linux, macOS, Windows)
+    CRITICAL_PROCESSES = {
+        # Linux / macOS core
+        'systemd', 'launchd', 'kernel_task', 'kthreadd',
+        'init', 'kworker', 'ksoftirqd', 'migration',
+        'watchdog', 'rcu_sched', 'rcu_bh',
+        'sshd', 'cron', 'dbus-daemon', 'networkmanager',
+        'wpa_supplicant', 'auditd', 'rsyslogd', 'journald',
+        'systemd-journald', 'systemd-udevd', 'systemd-resolved',
+        'systemd-logind', 'containerd', 'dockerd',
+        # macOS specific
+        'WindowServer', 'loginwindow', 'cfprefsd',
+        'opendirectoryd', 'configd', 'notifyd',
+        'diskarbitrationd', 'powerd', 'coreaudiod',
+        # Windows specific
+        'svchost.exe', 'lsass.exe', 'csrss.exe',
+        'wininit.exe', 'winlogon.exe', 'services.exe',
+        'smss.exe', 'System', 'Registry',
+        'dwm.exe', 'explorer.exe', 'taskhostw.exe',
+        'spoolsv.exe', 'MsMpEng.exe',
+    }
+
+    # System-level usernames — processes owned by these are treated as
+    # critical if they don't appear in the whitelist (Layer 2 fallback)
+    SYSTEM_USERS = {
+        # Linux / macOS
+        'root', 'daemon', 'nobody', 'messagebus',
+        'systemd-network', 'systemd-resolve', 'systemd-timesync',
+        '_windowserver', '_coreaudiod', 'www-data',
+        # Windows
+        'SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE',
+        'NT AUTHORITY\\SYSTEM',
+        'NT AUTHORITY\\LOCAL SERVICE',
+        'NT AUTHORITY\\NETWORK SERVICE',
+    }
+
+    def classify_process(self, name: str, username: str, ppid: int) -> str:
+        """
+        Option 3 importance classifier — three layers:
+
+        Layer 1 — Whitelist check:
+            If the process name (case-insensitive) is in CRITICAL_PROCESSES
+            → always 'critical', regardless of conditions matched.
+
+        Layer 2 — Ownership check:
+            If not on the whitelist but owned by a system user AND has no
+            meaningful parent (ppid == 0 or ppid == 1) → 'critical'.
+
+        Layer 3 — Condition-count fallback:
+            Used only when layers 1 & 2 don't apply. Passed in as
+            `matched_conditions` from the caller.
+        """
+        name_lower = name.lower().rstrip('.exe')
+
+        # Layer 1: whitelist
+        if name_lower in {p.lower().rstrip('.exe') for p in self.CRITICAL_PROCESSES}:
+            return 'critical'
+
+        # Layer 2: system ownership + no real parent
+        is_system_user = (username or '').strip() in self.SYSTEM_USERS
+        is_root_process = ppid in (0, 1)
+        if is_system_user and is_root_process:
+            return 'critical'
+
+        # Layer 3: caller decides based on condition count
+        return 'undecided'
+
+    def __init__(self):
+        super().__init__()
+        self._monitoring  = False
+        self.cpu_history  = {}   # pid -> [(timestamp, cpu_percent), ...]
+        self.top_processes = set()
+
+    # ------------------------------------------------------------------
+    def get_expected_cpu(self, process_name: str) -> int:
+        name = process_name.lower()
+        if 'chrome' in name or 'firefox' in name:
+            return self.EXPECTED_CPU['browser']
+        if 'ffmpeg' in name or 'encoder' in name:
+            return self.EXPECTED_CPU['video']
+        if 'screen' in name:
+            return self.EXPECTED_CPU['screensaver']
+        return self.EXPECTED_CPU['default']
+
+    # ------------------------------------------------------------------
+    def start_monitoring(self):
+        self._monitoring = True
+        self._timer = QTimer()
+        self._timer.timeout.connect(self._run_cycle)
+        self._timer.start(500)
+
+    def stop_monitoring(self):
+        self._monitoring = False
+        if hasattr(self, '_timer'):
+            self._timer.stop()
+
+    # ------------------------------------------------------------------
+    def _get_process_data(self) -> pd.DataFrame:
+        """Collect CPU usage and lifetime details of all processes."""
+        processes = []
+        for proc in psutil.process_iter(
+            ['pid', 'name', 'cpu_percent', 'username', 'ppid', 'create_time']
+        ):
+            try:
+                info = proc.info
+                parent_create_time = None
+                try:
+                    parent = psutil.Process(info['ppid'])
+                    parent_create_time = parent.create_time()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
+                processes.append({
+                    'pid':                info['pid'],
+                    'name':               info['name'],
+                    'cpu_percent':        info['cpu_percent'],
+                    'username':           info['username'],
+                    'ppid':               info['ppid'],
+                    'create_time':        info['create_time'],
+                    'parent_create_time': parent_create_time,
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return pd.DataFrame(processes)
+
+    # ------------------------------------------------------------------
+    def _run_cycle(self):
+        if not self._monitoring:
+            return
+
+        try:
+            process_df = self._get_process_data()
+            if process_df.empty:
+                self.anomaliesFound.emit([])
+                return
+
+            # Pick top-N CPU consumers
+            top_df = (
+                process_df
+                .sort_values(by='cpu_percent', ascending=False)
+                .head(self.TOP_X)
+            )
+            current_time = time.time()
+
+            # --- Build sustained-high-CPU set ---
+            sustained_high = set()
+            for _, row in top_df.iterrows():
+                pid      = row['pid']
+                cpu      = row['cpu_percent']
+                expected = self.get_expected_cpu(row['name'])
+
+                if pid not in self.cpu_history:
+                    self.cpu_history[pid] = []
+
+                self.cpu_history[pid].append((current_time, cpu))
+
+                # Trim to last SUSTAIN_TIME seconds
+                self.cpu_history[pid] = [
+                    (t, c) for t, c in self.cpu_history[pid]
+                    if current_time - t <= self.SUSTAIN_TIME
+                ]
+
+                if (
+                    len(self.cpu_history[pid]) > 0
+                    and all(c > expected for _, c in self.cpu_history[pid])
+                ):
+                    sustained_high.add(pid)
+
+            # --- Evaluate each top process ---
+            anomalies = []
+            for _, row in top_df.iterrows():
+                pid      = row['pid']
+                expected = self.get_expected_cpu(row['name'])
+
+                # Condition 1: CPU higher than expected
+                cpu_abnormal = row['cpu_percent'] > expected
+
+                # Condition 2: Sustained high CPU
+                sustained = pid in sustained_high
+
+                # Condition 3: Uptime abnormal vs parent
+                uptime_abnormal = False
+                if row['parent_create_time'] is not None:
+                    proc_uptime   = current_time - row['create_time']
+                    parent_uptime = current_time - row['parent_create_time']
+                    if proc_uptime > parent_uptime * 1.5:
+                        uptime_abnormal = True
+
+                matched = sum([cpu_abnormal, sustained, uptime_abnormal])
+
+                # Flag anomaly if at least 2 conditions match
+                if matched >= 2:
+
+                    # --- Option 3 classification ---
+                    # Run layers 1 & 2 first
+                    importance = self.classify_process(
+                        name=row['name'],
+                        username=row.get('username', ''),
+                        ppid=row['ppid'],
+                    )
+
+                    if importance == 'undecided':
+                        # Layer 3: fall back to condition count
+                        # 2 conditions -> less severe -> safe to remove
+                        # 3 conditions -> more severe -> treat as important
+                        importance = 'safe' if matched == 2 else 'critical'
+
+                    anomalies.append({
+                        'pid':   row['pid'],
+                        'name':  row['name'],
+                        'desc':  (
+                            "CPU consumption is in unusual range. "
+                            "Please check this process."
+                        ),
+                        'level': importance,
+                    })
+
+            self.anomaliesFound.emit(anomalies)
+
+        except Exception as e:
+            print(f"[AnomalyWorker] Error: {e}")
+
+    # ------------------------------------------------------------------
+    @Slot(int)
+    def terminate_process(self, pid: int):
+        try:
+            psutil.Process(pid).terminate()
+            print(f"[AnomalyWorker] Terminated PID {pid}")
+        except psutil.NoSuchProcess:
+            print(f"[AnomalyWorker] PID {pid} already gone")
+        except psutil.AccessDenied:
+            print(f"[AnomalyWorker] Access denied for PID {pid}")
+        except Exception as e:
+            print(f"[AnomalyWorker] Failed to terminate {pid}: {e}")
+
+
+# ==============================================================================
+# MAIN ANOMALY WINDOW
+# ==============================================================================
 
 class AnomalyWindow(BaseMonitorWindow):
     def __init__(self):
         super().__init__(active_tab="ANOMALY")
         self.setWindowTitle("Anomaly - Critique CLI")
-        
-        # Initialize data storage for plots (max 30 data points)
-        self.cpu_data = deque(maxlen=30)
-        self.ram_data = deque(maxlen=30)
-        self.disk_data = deque(maxlen=30)
-        
-        # Setup data collection timer
-        self.data_timer = QTimer()
-        self.data_timer.timeout.connect(self.collect_usage_data)
-        self.data_timer.start(1000)  # Collect data every 1 second
-        
-        # Setup clickable buttons after layout is initialized
-        self.after_layout_setup()
-    
-    def after_layout_setup(self):
-        """Setup clickable tab buttons after initial layout"""
-        # Find the tab button elements and make them clickable
+
+        # Build the scrollable card container
+        self._build_card_area()
+
+        # Make tab labels clickable
+        self._setup_clickable_tabs()
+
+        # Start the background anomaly worker
+        self._start_worker()
+
+    # ------------------------------------------------------------------
+    # UI SETUP
+    # ------------------------------------------------------------------
+
+    def _build_card_area(self):
+        """
+        QScrollArea — no visible scrollbar, transparent background,
+        natural overflow scrolling via mouse wheel / trackpad.
+        """
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea                     { background: transparent; border: none; }
+            QScrollArea > QWidget > QWidget { background: transparent; }
+        """)
+
+        self.card_container = QWidget()
+        self.card_container.setStyleSheet("background: transparent;")
+
+        self.card_layout = QVBoxLayout(self.card_container)
+        self.card_layout.setContentsMargins(2, 6, 2, 6)
+        self.card_layout.setSpacing(12)
+        self.card_layout.setAlignment(Qt.AlignTop)
+
+        self.scroll_area.setWidget(self.card_container)
+        self._position_scroll_area()
+
+    def _position_scroll_area(self):
+        """Fit the scroll area between the tab bar and the bottom stats row."""
+        w = self.width()
+        h = self.height()
+        sx = w / self.base_width
+        sy = h / self.base_height
+
+        pad_h  = int(50 * sx)          # left/right margin
+        top    = int(90 * sy)           # below tab labels + gap under "Inside Cli"
+        bottom = int(48 * sy)           # just above the stats labels
+
+        self.scroll_area.setGeometry(
+            pad_h,
+            top,
+            w - pad_h * 2,
+            h - top - bottom,
+        )
+
+    def _setup_clickable_tabs(self):
+        """Replace static tab QLabels with ClickableLabel instances."""
         for elem in self.elements:
             if elem["text"] in ["SYSTEM USAGE", "SCATTER PLOT", "ANOMALY"]:
-                old_label = elem["label"]
-                
-                # Create new clickable label
-                clickable_label = ClickableLabel(elem["text"], self)
-                clickable_label.setFont(old_label.font())
-                clickable_label.setStyleSheet(old_label.styleSheet())
-                clickable_label.move(old_label.pos())
-                clickable_label.adjustSize()
-                clickable_label.show()
-                
-                # Update element with new clickable label
-                old_label.hide()
-                elem["label"] = clickable_label
-                
-                # Connect click signals
-                if elem["text"] == "SYSTEM USAGE":
-                    clickable_label.clicked.connect(lambda: self.switch_tab("SYSTEM USAGE"))
-                elif elem["text"] == "SCATTER PLOT":
-                    clickable_label.clicked.connect(lambda: self.switch_tab("SCATTER PLOT"))
-                elif elem["text"] == "ANOMALY":
-                    clickable_label.clicked.connect(lambda: self.switch_tab("ANOMALY"))
-    
-    def collect_usage_data(self):
-        """Collect CPU, RAM, and DISK usage data"""
-        try:
-            cpu_percent = psutil.cpu_percent(interval=0)
-            ram_percent = psutil.virtual_memory().percent
-            disk_percent = psutil.disk_usage('/').percent
-            
-            self.cpu_data.append(cpu_percent)
-            self.ram_data.append(ram_percent)
-            self.disk_data.append(disk_percent)
-            
-            self.update()  # Trigger repaint
-        except Exception as e:
-            print(f"Error collecting usage data: {e}")
-    
-    def switch_tab(self, tab_name):
-        """Switch to a different tab and update UI"""
+                old = elem["label"]
+                new = ClickableLabel(elem["text"], self)
+                new.setFont(old.font())
+                new.setStyleSheet(old.styleSheet())
+                new.move(old.pos())
+                new.adjustSize()
+                new.show()
+                old.hide()
+                elem["label"] = new
+                tab = elem["text"]
+                new.clicked.connect(lambda _=False, t=tab: self.switch_tab(t))
+
+    # ------------------------------------------------------------------
+    # WORKER THREAD
+    # ------------------------------------------------------------------
+
+    def _start_worker(self):
+        self.worker        = AnomalyWorker()
+        self.worker_thread = QThread()
+        self.worker.moveToThread(self.worker_thread)
+        self.worker.anomaliesFound.connect(self._update_anomaly_cards)
+        self.worker.killProcess.connect(self.worker.terminate_process)
+        self.worker_thread.started.connect(self.worker.start_monitoring)
+        self.worker_thread.start()
+
+    def _stop_worker(self):
+        self.worker.stop_monitoring()
+        self.worker_thread.quit()
+        self.worker_thread.wait()
+
+    def closeEvent(self, event):
+        self._stop_worker()
+        event.accept()
+
+    # ------------------------------------------------------------------
+    # ANOMALY CARD RENDERING
+    # ------------------------------------------------------------------
+
+    @Slot(list)
+    def _update_anomaly_cards(self, anomalies: list):
+        """Rebuild the card list every time the worker emits new anomalies."""
+        self._clear_layout(self.card_layout)
+
+        if not anomalies:
+            empty = QLabel("No anomalies detected.")
+            empty.setFont(QFont("Inter", 11))
+            empty.setStyleSheet("color: rgba(63, 72, 101, 0.45); background: transparent;")
+            empty.setAlignment(Qt.AlignCenter)
+            self.card_layout.addWidget(empty)
+            return
+
+        for anomaly in anomalies:
+            self.card_layout.addWidget(self._make_card(anomaly))
+
+        self.card_layout.addStretch()
+
+    def _make_card(self, anomaly: dict) -> QFrame:
+        """
+        Modern polished anomaly card.
+
+        ┌────────────────────────────────────────────────────────────┐
+        │ ▐█▌  process name (bold, large)        [ teal/red badge ]  │
+        │      CPU consumption is in unusual…    [ End Task ]        │
+        └────────────────────────────────────────────────────────────┘
+
+        Left accent bar tinted teal (safe) or red (critical).
+        Card has a soft white background with a very light drop-shadow
+        effect achieved through layered border colours.
+        """
+        is_safe = anomaly["level"] == "safe"
+
+        accent_color  = "rgb(55, 162, 138)"  if is_safe else "rgb(214, 88, 52)"
+        badge_color   = "rgb(55, 162, 138)"  if is_safe else "rgb(214, 88, 52)"
+        badge_bg_soft = "rgba(55,162,138,0.12)" if is_safe else "rgba(214,88,52,0.10)"
+
+        # ── outer wrapper gives us the left accent bar trick ──────
+        # We stack two frames: outer clips, inner is the card body.
+        wrapper = QFrame()
+        wrapper.setMinimumHeight(70)
+        wrapper.setMaximumHeight(95)
+        wrapper.setObjectName("cardWrapper")
+        wrapper.setStyleSheet(f"""
+            QFrame#cardWrapper {{
+                background-color: {accent_color};
+                border-radius: 16px;
+            }}
+        """)
+
+        wrapper_row = QHBoxLayout(wrapper)
+        wrapper_row.setContentsMargins(5, 0, 0, 0)   # 5px left → accent bar width
+        wrapper_row.setSpacing(0)
+
+        # ── inner card body ───────────────────────────────────────
+        card = QFrame()
+        card.setObjectName("cardBody")
+        card.setStyleSheet("""
+            QFrame#cardBody {
+                background-color: #FEFCF4;
+                border-radius: 13px;
+            }
+        """)
+
+        wrapper_row.addWidget(card)
+
+        body = QHBoxLayout(card)
+        body.setContentsMargins(18, 10, 16, 10)
+        body.setSpacing(14)
+
+        # ── left: name + description ──────────────────────────────
+        left = QVBoxLayout()
+        left.setSpacing(4)
+        left.setContentsMargins(0, 0, 0, 0)
+
+        name_lbl = QLabel(anomaly["name"])
+        name_lbl.setFont(QFont("Inter", 12, QFont.Weight.Bold))
+        name_lbl.setStyleSheet(
+            "color: rgb(33, 40, 66); background: transparent; border: none;"
+        )
+
+        desc_lbl = QLabel(anomaly["desc"])
+        desc_lbl.setFont(QFont("Inter", 9))
+        desc_lbl.setStyleSheet(
+            "color: rgba(63, 72, 101, 0.60); background: transparent; border: none;"
+        )
+        desc_lbl.setWordWrap(True)
+
+        left.addStretch()
+        left.addWidget(name_lbl)
+        left.addWidget(desc_lbl)
+        left.addStretch()
+
+        # ── right: soft-tinted badge + optional End Task ──────────
+        right = QVBoxLayout()
+        right.setSpacing(8)
+        right.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+        right.setContentsMargins(0, 0, 0, 0)
+
+        badge = QLabel()
+        badge.setFixedWidth(152)
+        badge.setMinimumHeight(46)
+        badge.setWordWrap(True)
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setFont(QFont("Inter", 8, QFont.Weight.DemiBold))
+
+        if is_safe:
+            badge.setText("Process is not important\ncan be removed for\nCPU RELAXATION")
+        else:
+            badge.setText("Process is important\ncannot be removed for\nCPU RELAXATION")
+
+        badge.setStyleSheet(f"""
+            QLabel {{
+                background-color: {badge_bg_soft};
+                color: {badge_color};
+                border-radius: 10px;
+                border: 1.5px solid {badge_color};
+                padding: 6px 10px;
+            }}
+        """)
+
+        right.addWidget(badge, 0, Qt.AlignRight)
+
+        if is_safe:
+            kill_btn = QPushButton("End Task")
+            kill_btn.setFixedWidth(152)
+            kill_btn.setFixedHeight(30)
+            kill_btn.setFont(QFont("Inter", 9, QFont.Weight.DemiBold))
+            kill_btn.setCursor(Qt.PointingHandCursor)
+            kill_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {badge_color};
+                    color: #ffffff;
+                    border-radius: 8px;
+                    border: none;
+                    letter-spacing: 0.5px;
+                }}
+                QPushButton:hover   {{ background-color: rgb(190, 65, 30); }}
+                QPushButton:pressed {{ background-color: rgb(155, 50, 20); }}
+            """)
+            kill_btn.clicked.connect(
+                lambda _, pid=anomaly["pid"]: self.worker.killProcess.emit(pid)
+            )
+            right.addWidget(kill_btn, 0, Qt.AlignRight)
+
+        body.addLayout(left,  3)
+        body.addLayout(right, 1)
+
+        return wrapper
+
+    # ------------------------------------------------------------------
+    # HELPERS
+    # ------------------------------------------------------------------
+
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+            elif item.layout():
+                self._clear_layout(item.layout())
+
+    def switch_tab(self, tab_name: str):
         if self.active_tab == tab_name:
             return
-            
         self.active_tab = tab_name
-        
-        # Update opacity of all tab buttons
         for elem in self.elements:
             if elem["text"] in ["SYSTEM USAGE", "SCATTER PLOT", "ANOMALY"]:
-                if elem["text"] == tab_name:
-                    elem["opacity"] = 1.0  # Active tab
-                else:
-                    elem["opacity"] = 0.4  # Inactive tabs
-        
-        # Redraw the layout to update button appearances
+                elem["opacity"] = 1.0 if elem["text"] == tab_name else 0.4
         self.update_layout()
-        self.update()  # Trigger repaint to show new content
-    
-    def draw_usage_plots(self, painter, graph_left, graph_right, graph_top, graph_bottom):
-        """Draw CPU, RAM, and DISK usage plots"""
-        if len(self.cpu_data) < 2:
-            return  # Need at least 2 points to draw a line
-        
-        graph_width = graph_right - graph_left
-        graph_height = graph_bottom - graph_top
-        
-        # Helper function to convert data value to Y position
-        def value_to_y(value):
-            return graph_bottom - (graph_height * (value / 100))
-        
-        # Helper function to convert data index to X position
-        def index_to_x(index):
-            # Index 0 is 30 seconds ago, latest index is now (0 seconds ago)
-            x_progress = index / 29.0  # 0 to 1
-            return graph_left + (graph_width * x_progress)
-        
-        # Draw CPU plot (filled area + line, rgb(225, 170, 30), opacity 0.6)
-        points = []
-        for i, value in enumerate(self.cpu_data):
-            x = index_to_x(i)
-            y = value_to_y(value)
-            points.append((int(x), int(y)))
-        
-        # Create filled polygon for CPU
-        polygon_points = points + [(p[0], int(graph_bottom)) for p in reversed(points)]
-        if len(polygon_points) > 2:
-            polygon = QPolygon([QPoint(p[0], p[1]) for p in polygon_points])
-            painter.setBrush(QBrush(QColor(225, 170, 30, int(255 * 0.6))))
-            painter.setPen(Qt.NoPen)
-            painter.drawPolygon(polygon)
-        
-        # Draw CPU line on top
-        pen = QPen(QColor(225, 170, 30, int(255 * 0.6)))
-        pen.setWidth(2)
-        painter.setPen(pen)
-        for i in range(len(points) - 1):
-            painter.drawLine(points[i][0], points[i][1], points[i+1][0], points[i+1][1])
-        
-        # Draw RAM plot (filled area + line, rgb(59, 169, 144), opacity 0.6)
-        points = []
-        for i, value in enumerate(self.ram_data):
-            x = index_to_x(i)
-            y = value_to_y(value)
-            points.append((int(x), int(y)))
-        
-        # Create filled polygon for RAM
-        polygon_points = points + [(p[0], int(graph_bottom)) for p in reversed(points)]
-        if len(polygon_points) > 2:
-            polygon = QPolygon([QPoint(p[0], p[1]) for p in polygon_points])
-            painter.setBrush(QBrush(QColor(59, 169, 144, int(255 * 0.6))))
-            painter.setPen(Qt.NoPen)
-            painter.drawPolygon(polygon)
-        
-        # Draw RAM line on top
-        pen = QPen(QColor(59, 169, 144, int(255 * 0.6)))
-        pen.setWidth(2)
-        painter.setPen(pen)
-        for i in range(len(points) - 1):
-            painter.drawLine(points[i][0], points[i][1], points[i+1][0], points[i+1][1])
-        
-        # Draw DISK plot (dashed line, rgb(222, 96, 58), width 2px)
-        pen = QPen(QColor(222, 96, 58))
-        pen.setWidth(2)
-        pen.setDashPattern([5, 5])  # Dashed pattern
-        painter.setPen(pen)
-        
-        points = []
-        for i, value in enumerate(self.disk_data):
-            x = index_to_x(i)
-            y = value_to_y(value)
-            points.append((int(x), int(y)))
-        
-        for i in range(len(points) - 1):
-            painter.drawLine(points[i][0], points[i][1], points[i+1][0], points[i+1][1])
-    
-    def paintEvent(self, event):
-        """Draw the anomaly graph"""
-        super().paintEvent(event)
-        
-        # Get window dimensions for responsive design
-        width = self.width()
-        height = self.height()
-        
-        # Calculate scale based on base dimensions
-        scale = min(width / self.base_width, height / self.base_height)
-        
-        # Fixed margins that scale with window
-        margin_left = int(50 * scale)
-        margin_right = int(50 * scale)
-        margin_top = int(100 * scale)
-        margin_bottom = int(60 * scale)
-        
-        # Calculate graph dimensions to center it with maintained margins
-        graph_left = margin_left
-        graph_right = width - margin_right
-        graph_top = margin_top
-        graph_bottom = height - margin_bottom
-        
-        painter = QPainter(self)
-        
-        # Define consistent opacity for labels and lines
-        label_opacity = 0.6
-        line_opacity = 0.6
-        
-        # Draw horizontal grid lines and Y-axis labels
-        y_values = [100, 75, 50, 25]
-        for y_val in y_values:
-            # Calculate Y position (0% at bottom, 100% at top)
-            y_pos = graph_bottom - (graph_bottom - graph_top) * (y_val / 100) 
-            
-            # Draw horizontal line with consistent opacity
-            pen = QPen(QColor(63, 72, 101))
-            pen.setColor(QColor(63, 72, 101, int(255 * line_opacity)))
-            pen.setWidth(1)
-            painter.setPen(pen)
-            painter.drawLine(int(graph_left)+28, int(y_pos), int(graph_right), int(y_pos))
-            
-            # Draw Y-axis label with consistent opacity and semi-bold font
-            label_text = f"{y_val}%"
-            font_size = int(10 * scale)
-            font = QFont("Inter")
-            font.setPointSize(font_size)
-            font.setWeight(QFont.Weight.DemiBold)  # Semi-bold
-            painter.setFont(font)
-            painter.setPen(QColor(63, 72, 101, int(255 * label_opacity)))
-            # Position label at the start of the line, left-aligned to margin
-            label_x = int(graph_left)
-            label_y = int(y_pos - font_size / 2)
-            painter.drawText(label_x, label_y, int(40 * scale), font_size, 0, label_text)
-        
-        # Draw 0% line outside the loop with 100% opacity
-        y_pos = graph_bottom  # 0% is at the bottom
-        pen = QPen(QColor(63, 72, 101))
-        pen.setColor(QColor(63, 72, 101, int(255 * 1.0)))  # 100% opacity for 0% line
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.drawLine(int(graph_left), int(y_pos), int(graph_right), int(y_pos))
-        
-        # Draw X-axis and tick marks
-        x_values = list(range(30, -5, -5))  # [30, 25, 20, 15, 10, 5] - removed 0
-        tick_height = int(5 * scale)
-        
-        for i, x_val in enumerate(x_values):
-            # Calculate X position
-            x_pos = graph_left + (graph_right - graph_left) * ((30 - x_val) / 30)
-            
-            # Draw small upward tick mark (5px height)
-            pen = QPen(QColor(63, 72, 101, 255))
-            pen.setWidth(1)
-            painter.setPen(pen)
-            painter.drawLine(int(x_pos), int(graph_bottom), int(x_pos), int(graph_bottom - tick_height))
-            
-            # Draw X-axis label ABOVE the tick marks with 100% opacity, centered at vertical indicator
-            label_text = str(x_val)
-            font_size = int(8 * scale)
-            font = QFont("Inter")
-            font.setPointSize(font_size)
-            painter.setFont(font)
-            painter.setPen(QColor(63, 72, 101, 255))
-            # Center the label at x_pos
-            label_width = int(20 * scale)
-            label_x = int((x_pos - label_width / 2)+6)
-            # Position label above the tick marks
-            label_y = int(graph_bottom - tick_height - font_size - 3 * scale)
-            painter.drawText(label_x, label_y, label_width, font_size, 0, label_text)
-        
-        # Draw usage plots inside the graph area
-        self.draw_usage_plots(painter, graph_left, graph_right, graph_top, graph_bottom)
-        
-        painter.end()
+        self.update()
 
+    # ------------------------------------------------------------------
+    # RESIZE — reposition the scroll area when window resizes
+    # ------------------------------------------------------------------
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_scroll_area()
+
+    # ------------------------------------------------------------------
+    # paintEvent — no graph, just let BaseMonitorWindow draw its chrome
+    # ------------------------------------------------------------------
+
+    def paintEvent(self, event):
+        super().paintEvent(event)   # draws background + tab labels + stats
+
+
+# ==============================================================================
+# ENTRY POINT
+# ==============================================================================
 
 def open_anomaly_window():
-    """Function to open Anomaly window"""
     window = AnomalyWindow()
     window.show()
     return window
