@@ -1,45 +1,73 @@
 import os
-import sys
 import psutil
 from PySide6.QtWidgets import QMainWindow, QLabel
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QFontDatabase
-
+import sys
 
 class BaseMonitorWindow(QMainWindow):
     def __init__(self, active_tab="SYSTEM USAGE"):
         super().__init__()
+        self.setGeometry(100, 100, 700, 450)
 
-        
-        self.setGeometry(100, 100, 900, 560)
-        self.setMinimumSize(750, 450)  # Prevent layout collapse when resizing small
-
-        self.setWindowFlags(Qt.CustomizeWindowHint | Qt.WindowCloseButtonHint | Qt.WindowMinMaxButtonsHint)
+        if sys.platform == "darwin":
+            # Mac: removes title bar TEXT but keeps traffic light buttons natively
+            self.setWindowFlags(
+                Qt.Window |
+                Qt.CustomizeWindowHint |
+                Qt.WindowCloseButtonHint |
+                Qt.WindowMinimizeButtonHint |
+                Qt.WindowMaximizeButtonHint
+            )
+        else:
+            # Windows: keep standard title bar behavior
+            self.setWindowFlags(
+                Qt.Window |
+                Qt.WindowCloseButtonHint |
+                Qt.WindowMinimizeButtonHint |
+                Qt.WindowMaximizeButtonHint
+            )       
         self.setStyleSheet("background-color: #FEF3D7; QMainWindow { background-color: #FEF3D7; }")
-
         
-        self.base_width = 900
-        self.base_height = 560
-
+        # Base dimensions for ratio calculations
+        self.base_width = 750
+        self.base_height = 450
+        
+        if sys.platform == "darwin":
+            self._title_bar_offset = 0   # Mac traffic lights don't eat into content
+        else:
+            self._title_bar_offset = 10  # Windows title bar is slightly taller
+            
+        # Track which tab is active
         self.active_tab = active_tab
+        
+        if sys.platform == "darwin":
+            font_size = 14
+            cli_font_size = 40
+            self.stat_size=16
+        else:
+            font_size = 12
+            cli_font_size = 36
+            self.stat_size = 14
 
         # Load fonts
         script_dir = os.path.dirname(os.path.abspath(__file__))
         abril_path = os.path.join(script_dir, "Fonts/Abril Fatface/AbrilFatface-Regular.ttf")
         QFontDatabase.addApplicationFont(abril_path)
-
+        
         inter_path = os.path.join(script_dir, "Fonts/Inter Font Family/Inter-ExtraBold.otf")
         QFontDatabase.addApplicationFont(inter_path)
-
+        
         inter_semibold_path = os.path.join(script_dir, "Fonts/Inter Font Family/Inter-SemiBold.otf")
         QFontDatabase.addApplicationFont(inter_semibold_path)
-
+        
+        # Element definitions with base font sizes and positions
         self.elements = [
             {
                 "text": "Inside Cli",
                 "font_name": "Abril Fatface",
-                "base_font_size": 40,
-                "base_pos": (650, 4),
+                "base_font_size": cli_font_size,
+                "base_pos": (650, 22),
                 "color": "rgb(63, 72, 101)",
                 "opacity": 1.0,
                 "label": None,
@@ -49,8 +77,8 @@ class BaseMonitorWindow(QMainWindow):
             {
                 "text": "SYSTEM USAGE",
                 "font_name": "Inter",
-                "base_font_size": 14,
-                "base_pos": (39, 28),
+                "base_font_size": font_size,
+                "base_pos": (39, 56),
                 "color": "rgb(63, 72, 101)",
                 "opacity": 1.0 if active_tab == "SYSTEM USAGE" else 0.4,
                 "label": None,
@@ -59,8 +87,8 @@ class BaseMonitorWindow(QMainWindow):
             {
                 "text": "SCATTER PLOT",
                 "font_name": "Inter",
-                "base_font_size": 14,
-                "base_pos": (210, 28),
+                "base_font_size": font_size,
+                "base_pos": (196, 56),
                 "color": "rgb(63, 72, 101)",
                 "opacity": 1.0 if active_tab == "SCATTER PLOT" else 0.4,
                 "label": None,
@@ -69,62 +97,68 @@ class BaseMonitorWindow(QMainWindow):
             {
                 "text": "ANOMALY",
                 "font_name": "Inter",
-                "base_font_size": 14,
-                "base_pos": (370, 28),
+                "base_font_size": font_size,
+                "base_pos": (349, 56),
                 "color": "rgb(63, 72, 101)",
                 "opacity": 1.0 if active_tab == "ANOMALY" else 0.4,
                 "label": None,
                 "is_extra_bold": True
             }
         ]
-
+        
+        # Create all labels
         for elem in self.elements:
             label = QLabel(elem["text"], self)
             elem["label"] = label
-
+        
+        # Add bottom stats
         self.add_bottom_stats()
-
+        
+        # Setup timer for live stats updates
         self.stats_timer = QTimer()
         self.stats_timer.timeout.connect(self.update_stats)
-        self.stats_timer.start(1000)
-
+        self.stats_timer.start(1000)  # Update every 1 second
+        
         self.update_layout()
+    
 
     def add_bottom_stats(self):
         """Add CPU, RAM, and DISK stats at the bottom with live updates"""
         self.stat_labels = {}
-
         
         stats = [
             {
                 "key": "cpu",
-                "text": "CPU: --.--%",
+                "text": "CPU :             ",
                 "font_name": "Inter",
-                "base_font_size": 16,
-                "base_pos": (50, 510),
+                "base_font_size": self.stat_size,
+                "base_pos": (50, 410),
                 "color": "rgb(255, 170, 30)",
                 "is_semibold": True,
+                "bottom_margin": 20
             },
             {
                 "key": "ram",
-                "text": "RAM: --.--%",
+                "text": "RAM :             ",
                 "font_name": "Inter",
-                "base_font_size": 16,
-                "base_pos": (230, 510),
+                "base_font_size": self.stat_size,
+                "base_pos": (180, 410),
                 "color": "rgb(57, 171, 142)",
                 "is_semibold": True,
+                "bottom_margin": 20
             },
             {
                 "key": "disk",
-                "text": "DISK: --.--%",
+                "text": "DISK :              ",
                 "font_name": "Inter",
-                "base_font_size": 16,
-                "base_pos": (430, 510),
+                "base_font_size": self.stat_size ,
+                "base_pos": (310, 410),
                 "color": "rgb(222, 96, 58)",
                 "is_semibold": True,
+                "bottom_margin": 20
             }
         ]
-
+        
         for stat in stats:
             self.elements.append({
                 "text": stat["text"],
@@ -140,61 +174,69 @@ class BaseMonitorWindow(QMainWindow):
             label = QLabel(stat["text"], self)
             self.elements[-1]["label"] = label
             self.stat_labels[stat["key"]] = label
-
+    
     def update_stats(self):
         """Update live CPU, RAM, and DISK stats"""
         try:
+            # Get CPU usage
             cpu_percent = psutil.cpu_percent(interval=0.1)
-            ram_percent = psutil.virtual_memory().percent
-            disk_percent = psutil.disk_usage('/').percent
-
+            
+            # Get RAM usage
+            ram = psutil.virtual_memory()
+            ram_percent = ram.percent
+            
+            # Get DISK usage
+            disk = psutil.disk_usage('/')
+            disk_percent = disk.percent
+            
+            # Update labels with actual values
             self.stat_labels["cpu"].setText(f"CPU: {cpu_percent:.1f}%")
             self.stat_labels["ram"].setText(f"RAM: {ram_percent:.1f}%")
             self.stat_labels["disk"].setText(f"DISK: {disk_percent:.1f}%")
-
-           
-            self.update_layout()
         except Exception as e:
             print(f"Error updating stats: {e}")
-
+    
     def update_layout(self):
         """Update positions and font sizes based on current window dimensions"""
         current_width = self.width()
         current_height = self.height()
-
+        
         scale_x = current_width / self.base_width
         scale_y = current_height / self.base_height
-
+        
         for elem in self.elements:
             label = elem["label"]
-
-            # Scale font size with a minimum so it never hits 0
-            scaled_font_size = max(8, int(elem["base_font_size"] * min(scale_x, scale_y)))
+            
+            # Scale font size
+            scaled_font_size = int(elem["base_font_size"] * min(scale_x, scale_y))
             font = QFont(elem["font_name"], scaled_font_size)
             label.setFont(font)
-
             
-            if elem.get("is_semibold"):
-                color = elem.get("color", "rgb(63, 72, 101)")
-                label.setStyleSheet(f"color: {color};")
-            else:
-                label.setStyleSheet(f"color: rgba(63, 72, 101, {elem['opacity']});")
-
-            
-            label.adjustSize()
-
-            # Now position is calculated with accurate label dimensions
+            # Handle right-aligned elements
             if elem.get("align_right"):
+                label.adjustSize()  # Get the width of the label
                 right_margin = int(elem.get("right_margin", 50) * min(scale_x, scale_y))
                 scaled_x = current_width - right_margin - label.width()
                 scaled_y = int(elem["base_pos"][1] * scale_y)
             else:
+                # Scale position normally
                 scaled_x = int(elem["base_pos"][0] * scale_x)
                 scaled_y = int(elem["base_pos"][1] * scale_y)
-
+            
             label.move(scaled_x, scaled_y)
+            
+            # Set color with opacity
+            if "is_semibold" in elem and elem.get("is_semibold"):
+                color = elem.get("color", "rgb(63, 72, 101)")
+                label.setStyleSheet(f"color: {color};")
+            else:
+                opacity_percent = int(elem["opacity"] * 100)
+                color = elem.get("color", "rgb(63, 72, 101)")
+                label.setStyleSheet(f"color: rgba(63, 72, 101, {elem['opacity']});")
+            
+            label.adjustSize()
             label.show()
-
+    
     def resizeEvent(self, event):
         """Handle window resize events"""
         super().resizeEvent(event)
