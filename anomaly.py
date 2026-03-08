@@ -2,8 +2,8 @@ import sys
 import psutil
 from collections import deque
 from PySide6.QtWidgets import QApplication, QLabel
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygon, QPoint
+from PySide6.QtCore import QPoint, QTimer, Qt, Signal
+from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygon
 from base_window import BaseMonitorWindow
 
 
