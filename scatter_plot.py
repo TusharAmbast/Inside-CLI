@@ -42,7 +42,7 @@ USER_GROUP_GAP = 60
 
 # Node radius range (mapped from cpu %)
 R_MIN = 12
-R_MAX = 44
+R_MAX = 30
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
