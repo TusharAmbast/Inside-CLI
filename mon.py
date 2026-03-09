@@ -28,8 +28,10 @@ class SystemUsageWindow(BaseMonitorWindow):
         self.ram_data  = deque(maxlen=30)
         self.disk_data = deque(maxlen=30)
 
-        # ── Scatter plot widget (child, hidden until tab is active) ───
-        self._scatter = ScatterPlotWidget(parent=self)
+        # ── Scatter plot widget ───────────────────────────────────────
+        # scatter_plot.py shim sets embedded=True — zero internal padding.
+        # mon.py owns the geometry via _reposition_scatter().
+        self._scatter = ScatterPlotWidget(parent=self, embedded=True)
         self._scatter.hide()
 
         # Data refresh timer for scatter (every 2 s)
@@ -110,12 +112,10 @@ class SystemUsageWindow(BaseMonitorWindow):
             if elem["text"] in ["SYSTEM USAGE", "SCATTER PLOT", "ANOMALY"]:
                 elem["opacity"] = 1.0 if elem["text"] == tab_name else 0.4
 
-        # Show / hide scatter widget
         if tab_name == "SCATTER PLOT":
             self._reposition_scatter()
             self._scatter.show()
             self._scatter.raise_()
-            # Kick off an immediate data load if empty
             if not self._scatter._data:
                 self._refresh_scatter()
         else:
@@ -135,7 +135,7 @@ class SystemUsageWindow(BaseMonitorWindow):
         except Exception as e:
             print(f"Error collecting usage data: {e}")
 
-    # ── resize: keep scatter widget in sync ──────────────────────────
+    # ── resize ────────────────────────────────────────────────────────
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -229,7 +229,6 @@ class SystemUsageWindow(BaseMonitorWindow):
             label_opacity = 0.6
             line_opacity  = 0.6
 
-            # Y-axis grid + labels
             for y_val in [100, 75, 50, 25]:
                 y_pos = graph_bottom - (graph_bottom - graph_top) * (y_val / 100)
                 pen = QPen(QColor(63, 72, 101, int(255 * line_opacity)))
@@ -246,14 +245,12 @@ class SystemUsageWindow(BaseMonitorWindow):
                 painter.drawText(int(graph_left), int(y_pos - font_size/divvv),
                                  int(scall*scale), font_size*ftttt, 0, f"{y_val}%")
 
-            # 0% baseline
             pen = QPen(QColor(63, 72, 101))
             pen.setWidth(1)
             painter.setPen(pen)
             painter.drawLine(int(graph_left), int(graph_bottom),
                              int(graph_right), int(graph_bottom))
 
-            # X-axis ticks + labels
             tick_height = int(5 * scale)
             for x_val in range(30, -5, -5):
                 x_pos = graph_left + (graph_right-graph_left) * ((30-x_val)/30)
@@ -270,13 +267,10 @@ class SystemUsageWindow(BaseMonitorWindow):
                 lw = int(20 * scale)
                 lx = int(x_pos - lw/2 + 6)
                 ly = int((graph_bottom - tick_height - font_size - 3*scale)-mkc)
-                painter.drawText(lx, ly, lw, (font_size*ftttt) , 0, str(x_val))
+                painter.drawText(lx, ly, lw, (font_size*ftttt), 0, str(x_val))
 
             self.draw_usage_plots(painter, graph_left, graph_right,
                                   graph_top, graph_bottom)
-
-        # SCATTER PLOT tab — ScatterPlotWidget child handles its own painting,
-        # nothing to draw here in paintEvent.
 
         elif self.active_tab == "ANOMALY":
             painter.setPen(QColor(63, 72, 101))

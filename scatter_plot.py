@@ -1,34 +1,33 @@
 """
 scatter_plot_window.py
 ─────────────────────────────────────────────────────────────────────────────
-Owns everything except the fluid drawing primitive:
-  - window size (700 × 450)
-  - padding (top=100, bottom=60, left=50, right=50)
-  - data pipeline (psutil → nodes)
-  - LERP animation
-  - background, grid, dividers, labels, title
-  - calls FluidRenderer to draw blobs/belts
+Owns layout, padding, animation, data pipeline, labels.
+Delegates blob/belt drawing to FluidRenderer from fluid_plot.py.
 
-To call from mon.py:
-    from scatter_plot_window import open_scatter_plot_window
-    win = open_scatter_plot_window()
-    win.show()
+Fixes applied
+─────────────
+1. CLIPPING  — plot area is inset by R_MAX + max_pad so the first/last
+               blob never clips against the margin edge.
+2. STABLE X  — each process name is assigned a fixed X slot on first seen.
+               On refresh, only Y and radius update (LERP). Nodes never
+               jump or re-randomize their horizontal position.
+3. NO SPLINE — skeleton line removed from FluidRenderer entirely.
 """
 
 import sys
-import random
 import psutil
 from collections import defaultdict
 
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 from PySide6.QtCore    import Qt, QTimer, QPointF
-from PySide6.QtGui     import QPainter, QColor, QPen, QFont, QFontMetrics, QBrush
+from PySide6.QtGui     import QPainter, QColor, QPen, QFont, QFontMetrics
 
-from base_window import BaseMonitorWindow
-from fluid_plot  import FluidRenderer, build_color_map
+from base_window      import BaseMonitorWindow
+from fluid_plot       import FluidRenderer, build_color_map, _dyn_pad
+from scatter_details  import draw_detail_box, BOX_W, BOX_GAP, box_rect
 
 
-# ─── Window / layout constants ───────────────────────────────────────────────
+# ─── Layout constants ────────────────────────────────────────────────────────
 
 WIN_W      = 700
 WIN_H      = 450
@@ -37,12 +36,18 @@ PAD_BOTTOM =  60
 PAD_LEFT   =  50
 PAD_RIGHT  =  50
 
-# Pixel gap inserted between different user groups along X
-USER_GROUP_GAP = 60
+# Largest blob outer radius = R_MAX + dyn_pad(R_MAX)
+# _EDGE_INSET pushes every node centre inward so even the biggest blob
+# stays exactly 5 px away from the top/bottom/left/right divider lines.
+R_MAX        = 30
+_BLOB_MAX    = int(R_MAX + _dyn_pad(R_MAX))   # max outer radius ≈ 57 px
+_EDGE_INSET  = _BLOB_MAX + 5                  # 5 px clearance from lines
 
-# Node radius range (mapped from cpu %)
+# Gap between user groups along X
+USER_GROUP_GAP = 50
+
+# Radius range mapped from cpu %
 R_MIN = 12
-R_MAX = 30
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
@@ -78,16 +83,17 @@ class ProcessDataProcessor:
         return user_data
 
     @staticmethod
-    def filter_active_users(user_data, cpu_threshold=1.5):
+    def filter_active_users(user_data, cpu_threshold=1.0):
         return {u: d for u, d in user_data.items()
                 if d['total_cpu'] > cpu_threshold}
 
     @staticmethod
-    def filter_and_sort_processes(user_data, process_cpu_threshold=1.0):
+    def filter_and_sort_processes(user_data, process_cpu_threshold=0.5):
         result = {}
         for user, data in user_data.items():
             filtered = [p for p in data['processes']
                         if p['cpu_percent'] >= process_cpu_threshold]
+            # Sort highest CPU first within each user
             result[user] = sorted(filtered,
                                   key=lambda x: x['cpu_percent'], reverse=True)
         return result
@@ -103,12 +109,15 @@ class ProcessDataProcessor:
     @staticmethod
     def to_fluid_data(processed: dict) -> list[dict]:
         """
-        Flatten pipeline output → [{"label", "value", "user"}, …]
-        Nodes stay grouped by user so belts connect within each group.
+        Flatten pipeline → [{"label", "value", "user"}, …]
+        Within each user, processes are sorted ALPHABETICALLY by name.
+        X positions are therefore stable — a process always occupies the
+        same horizontal slot. Only Y and radius change with CPU usage.
         """
         flat = []
         for user, procs in sorted(processed.items()):
-            for p in procs:
+            # Alphabetical sort — fixes X order permanently
+            for p in sorted(procs, key=lambda x: x['name'].lower()):
                 flat.append({
                     "label": p['name'][:12],
                     "value": p['cpu_percent'],
@@ -117,100 +126,187 @@ class ProcessDataProcessor:
         return flat
 
 
-# ─── Node position calculator ────────────────────────────────────────────────
+# ─── Node layout ─────────────────────────────────────────────────────────────
 
-def _compute_nodes(data: list[dict], plot_w: int, plot_h: int,
-                   plot_x: int, plot_y: int) -> list[tuple]:
+def _value_to_radius(t: float) -> float:
+    return R_MIN + (R_MAX - R_MIN) * t
+
+
+def _assign_x_slots(data: list[dict], plot_x: int, plot_w: int) -> dict:
     """
-    Map data → (QPointF, radius) list.
+    Assign a FIXED X coordinate to every unique (user, label) pair.
+    Order is alphabetical within each user group — matching to_fluid_data.
 
-    X : users laid out left→right with USER_GROUP_GAP between groups.
-        nodes within a group are evenly spaced.
-    Y : high value = high on screen (low pixel-Y).
-    r : mapped from value to [R_MIN, R_MAX].
+    Left edge  : first node centre = plot_x + outer_radius(first) + 5
+    Right edge : last  node centre = plot_x + plot_w - outer_radius(last) - 5
+    This guarantees every blob sits exactly 5 px from the divider lines.
     """
-    if not data:
-        return []
+    user_order: list[str]            = []
+    groups:     dict[str, list[str]] = {}
 
-    # group indices by user (first-seen order)
-    user_order = []
-    groups: dict[str, list[int]] = {}
-    for i, d in enumerate(data):
-        u = d["user"]
+    for d in data:
+        u, lbl = d["user"], d["label"]
         if u not in groups:
             groups[u] = []
             user_order.append(u)
-        groups[u].append(i)
+        if lbl not in groups[u]:
+            groups[u].append(lbl)
 
-    n_total = len(data)
-    n_gaps  = len(user_order) - 1
-    node_space = plot_w - n_gaps * USER_GROUP_GAP
-    node_step  = node_space / max(n_total - 1, 1)
+    for u in user_order:
+        groups[u].sort(key=str.lower)
+
+    # Build ordered list of (user, label) and their normalised values
+    ordered = []
+    values  = [d["value"] for d in data]
+    v_min   = min(values);  v_max = max(values)
+    v_range = v_max - v_min or 1.0
+
+    # value lookup: (user, label) → latest value
+    val_map = {(d["user"], d["label"]): d["value"] for d in data}
+
+    for u in user_order:
+        for lbl in groups[u]:
+            ordered.append((u, lbl))
+
+    n = len(ordered)
+    if n == 0:
+        return {}
+
+    def _outer(key):
+        v = val_map.get(key, 0)
+        t = (v - v_min) / v_range
+        r = _value_to_radius(t)
+        return r + _dyn_pad(r)
+
+    # First node: its centre must be at least outer_r + 5 from left line
+    x_start = plot_x + _outer(ordered[0]) + 5
+    # Last node: its centre must be at least outer_r + 5 from right line
+    x_end   = plot_x + plot_w - _outer(ordered[-1]) - 5
+
+    n_gaps   = len(user_order) - 1
+    usable_w = x_end - x_start - n_gaps * USER_GROUP_GAP
+    step     = usable_w / max(n - 1, 1)
+
+    slots    = {}
+    x_cursor = x_start
+    for u_idx, u in enumerate(user_order):
+        for local_i, lbl in enumerate(groups[u]):
+            slots[(u, lbl)] = x_cursor + local_i * step
+        x_cursor += len(groups[u]) * step + USER_GROUP_GAP
+
+    return slots
+
+
+def _compute_targets(data: list[dict], x_slots: dict,
+                     plot_y: int, plot_h: int) -> list[tuple]:
+    """
+    Build target (QPointF, radius) using stable X slots.
+    Y: high value node sits 5px below top line, low value sits 5px above bottom line.
+    """
+    if not data:
+        return []
 
     values  = [d["value"] for d in data]
     v_min   = min(values);  v_max = max(values)
     v_range = v_max - v_min or 1.0
 
-    nodes = [None] * n_total
-    x_cursor = plot_x
+    nodes = []
+    for d in data:
+        t  = (d["value"] - v_min) / v_range
+        r  = _value_to_radius(t)
+        pr = r + _dyn_pad(r)
 
-    for u_idx, u in enumerate(user_order):
-        idxs = groups[u]
-        for local_i, global_i in enumerate(idxs):
-            d = data[global_i]
-            t = (d["value"] - v_min) / v_range
-            x = x_cursor + local_i * node_step
-            y = plot_y + plot_h * (1.0 - t) + random.uniform(-5, 5)
-            r = R_MIN + (R_MAX - R_MIN) * t
-            nodes[global_i] = (QPointF(x, y), r)
+        x = x_slots.get((d["user"], d["label"]), plot_y)
 
-        x_cursor += len(idxs) * node_step + USER_GROUP_GAP
+        # y_top_centre  : highest possible centre (blob top = plot_y + 5)
+        # y_bot_centre  : lowest  possible centre (blob bot = plot_y + plot_h - 5)
+        y_top = plot_y  + pr + 5
+        y_bot = plot_y  + plot_h - pr - 5
+        y = y_top + (y_bot - y_top) * (1.0 - t)
+
+        nodes.append((QPointF(x, y), r))
 
     return nodes
 
 
-# ─── Plot widget ─────────────────────────────────────────────────────────────
+# ─── Widget ──────────────────────────────────────────────────────────────────
 
 class ScatterPlotWidget(QWidget):
     """
-    The actual plot canvas.
-    Handles animation, background, grid, labels.
-    Delegates blob/belt drawing to FluidRenderer.
+    Plot canvas.
+    - Blob area: full width when panel closed, shrinks by BOX_W+BOX_GAP when open.
+    - Blobs LERP into the narrowed space when panel opens, and back on close.
+    - Detail panel is drawn at a fixed right position inside the plot area.
+    - Click blob → open panel. Click anywhere outside panel → close.
+
+    embedded=True  (used by mon.py): widget is already placed at the plot rect,
+                   so internal padding is 0 on all sides.
+    embedded=False (standalone ScatterPlotWindow): widget fills the whole window,
+                   so internal padding carves out the plot area.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, embedded: bool = False):
         super().__init__(parent)
 
-        self._data         : list[dict] = []
-        self._color_map    : dict       = {}
-        self._current_nodes: list       = []
-        self._target_nodes : list       = []
+        self._embedded      : bool       = embedded
+        self._data          : list[dict] = []
+        self._color_map     : dict       = {}
+        self._x_slots       : dict       = {}
+        self._current_nodes : list       = []
+        self._target_nodes  : list       = []
+
+        # Detail panel state
+        self._panel_open    : bool       = False
+        self._panel_proc    : str        = ""
+        self._panel_parent  : str        = ""
 
         self._anim = QTimer(self)
         self._anim.timeout.connect(self._step)
-        self._anim.start(16)   # ~60 fps
+        self._anim.start(16)
 
     # ── public ───────────────────────────────────────────────────────
 
     def set_data(self, data: list[dict]):
         self._data      = data
         self._color_map = build_color_map(data)
+        px, py, pw, ph  = self._plot_rect()
+        blob_pw         = self._blob_plot_w(pw)
+        new_slots = _assign_x_slots(data, px, blob_pw)
+        for key, x in new_slots.items():
+            if key not in self._x_slots:
+                self._x_slots[key] = x
         self._rebuild_targets()
 
     # ── internal ─────────────────────────────────────────────────────
 
     def _plot_rect(self):
-        """Returns (plot_x, plot_y, plot_w, plot_h) based on current widget size."""
+        """
+        Full plot area in widget-local coordinates.
+        Embedded: widget sits exactly at the plot rect already → no padding.
+        Standalone: widget fills the whole window → carve out with PAD_*.
+        """
         w, h = self.width(), self.height()
-        px = PAD_LEFT
-        py = PAD_TOP
-        pw = w - PAD_LEFT - PAD_RIGHT
-        ph = h - PAD_TOP  - PAD_BOTTOM
-        return px, py, pw, ph
+        if self._embedded:
+            return (0, 0, w, h)
+        return (PAD_LEFT, PAD_TOP,
+                w - PAD_LEFT - PAD_RIGHT,
+                h - PAD_TOP  - PAD_BOTTOM)
+
+    def _blob_plot_w(self, plot_w: int) -> int:
+        """
+        Width available for blobs.
+        When panel is open the right portion is reserved for the box.
+        """
+        if self._panel_open:
+            return plot_w - BOX_W - BOX_GAP
+        return plot_w
 
     def _rebuild_targets(self):
         px, py, pw, ph = self._plot_rect()
-        targets = _compute_nodes(self._data, pw, ph, px, py)
+        blob_pw        = self._blob_plot_w(pw)
+        # Recompute ALL x slots fresh so blobs spread into the new width
+        self._x_slots  = _assign_x_slots(self._data, px, blob_pw)
+        targets = _compute_targets(self._data, self._x_slots, py, ph)
         if len(targets) != len(self._current_nodes):
             self._current_nodes = [(QPointF(p.x(), p.y()), r)
                                    for p, r in targets]
@@ -225,21 +321,77 @@ class ScatterPlotWidget(QWidget):
         for i in range(len(self._current_nodes)):
             cp, cr = self._current_nodes[i]
             tp, tr = self._target_nodes[i]
-            nx = cp.x() + (tp.x()-cp.x())*s
-            ny = cp.y() + (tp.y()-cp.y())*s
-            nr = cr     + (tr-cr)*s
+            nx = cp.x() + (tp.x() - cp.x()) * s
+            ny = cp.y() + (tp.y() - cp.y()) * s
+            nr = cr     + (tr - cr) * s
             self._current_nodes[i] = (QPointF(nx, ny), nr)
-            if abs(tp.x()-nx)>0.4 or abs(tp.y()-ny)>0.4 or abs(tr-nr)>0.05:
+            if abs(tp.x()-nx) > 0.4 or abs(tp.y()-ny) > 0.4 or abs(tr-nr) > 0.05:
                 moved = True
         if moved:
             self.update()
 
-    def resizeEvent(self, e):
-        self._rebuild_targets()
-        super().resizeEvent(e)
+    def _hit_node(self, mx: float, my: float) -> int:
+        for i, (pt, r) in enumerate(self._current_nodes):
+            pr = r + _dyn_pad(r)
+            dx = mx - pt.x();  dy = my - pt.y()
+            if dx*dx + dy*dy <= pr*pr:
+                return i
+        return -1
 
-    def mousePressEvent(self, _):
-        self._rebuild_targets()
+    def _panel_rect(self):
+        """Returns (x, y, w, h) of the detail box in widget coords, or None."""
+        if not self._panel_open:
+            return None
+        px, py, pw, ph = self._plot_rect()
+        return box_rect(px, py, pw, ph)
+
+    @staticmethod
+    def _get_parent_name(proc_name: str) -> str:
+        try:
+            for proc in psutil.process_iter(['name', 'ppid']):
+                if proc.info['name'] == proc_name:
+                    ppid = proc.info['ppid']
+                    if ppid:
+                        try:
+                            return psutil.Process(ppid).name()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            return "—"
+        except Exception:
+            pass
+        return "—"
+
+    # ── events ───────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
+        mx, my = event.position().x(), event.position().y()
+
+        # If panel is open: click inside panel = ignore; outside = close
+        if self._panel_open:
+            pr = self._panel_rect()
+            if pr:
+                bx, by, bw, bh = pr
+                if bx <= mx <= bx + bw and by <= my <= by + bh:
+                    return   # inside panel — do nothing
+            # Outside panel → close it and let blobs expand back
+            self._panel_open = False
+            self._rebuild_targets()
+            self.update()
+            return
+
+        # Panel closed: check if a blob was hit
+        idx = self._hit_node(mx, my)
+        if 0 <= idx < len(self._data):
+            d = self._data[idx]
+            self._panel_proc   = d["label"]
+            self._panel_parent = self._get_parent_name(d["label"])
+            self._panel_open   = True
+            self._rebuild_targets()   # narrows blob area → blobs LERP left
+            self.update()
+
+    def resizeEvent(self, e):
+        if self._data:
+            self._rebuild_targets()
+        super().resizeEvent(e)
 
     # ── paint ────────────────────────────────────────────────────────
 
@@ -249,21 +401,21 @@ class ScatterPlotWidget(QWidget):
         w, h = self.width(), self.height()
 
         px, py, pw, ph = self._plot_rect()
-        plot_bottom = py + ph
+        plot_bottom    = py + ph
 
-        # ── background ───────────────────────────────────────────────
+        # Background
         painter.fillRect(0, 0, w, h, BG_COLOR)
 
-        # ── horizontal ruled lines ────────────────────────────────────
+        # Horizontal ruled lines — always span FULL plot width
         painter.setPen(QPen(GRID_COLOR, 1))
         for i in range(11):
-            y = int(py + ph * i / 10)
-            painter.drawLine(px, y, px + pw, y)
+            gy = int(py + ph * i / 10)
+            painter.drawLine(px, gy, px + pw, gy)
 
-        # ── top / bottom dividers ─────────────────────────────────────
+        # Top / bottom dividers — full width
         painter.setPen(QPen(DIVIDER, 1))
-        painter.drawLine(px, py,           px + pw, py)
-        painter.drawLine(px, plot_bottom,  px + pw, plot_bottom)
+        painter.drawLine(px, py,          px + pw, py)
+        painter.drawLine(px, plot_bottom, px + pw, plot_bottom)
 
         nodes = self._current_nodes
         if not nodes:
@@ -272,18 +424,17 @@ class ScatterPlotWidget(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No data")
             return
 
-        # ── fluid blobs + belts ───────────────────────────────────────
+        # Fluid blobs + belts
         FluidRenderer(painter, nodes, self._data, self._color_map).draw()
 
-        # ── username labels (centred under each user group) ───────────
+        # Username labels centred under each user group
         painter.setFont(QFont("Georgia", 10, QFont.Weight.Normal, True))
         fm = QFontMetrics(painter.font())
         label_y = plot_bottom + 26
 
         groups: dict[str, list] = {}
         for i, (pt, _) in enumerate(nodes):
-            u = self._data[i]["user"]
-            groups.setdefault(u, []).append(pt.x())
+            groups.setdefault(self._data[i]["user"], []).append(pt.x())
 
         for u, xs in groups.items():
             blob, _ = self._color_map.get(u, (QColor(254, 197, 110),
@@ -291,21 +442,40 @@ class ScatterPlotWidget(QWidget):
             mid = (min(xs) + max(xs)) / 2
             uw  = fm.horizontalAdvance(u)
             painter.setPen(blob.darker(160))
-            painter.drawText(int(mid - uw/2), label_y, u)
+            painter.drawText(int(mid - uw / 2), label_y, u)
 
-        # ── process name labels (small, above each blob) ──────────────
+        # Process name above each blob (small, muted)
         painter.setFont(QFont("Georgia", 7))
         fm2 = QFontMetrics(painter.font())
         painter.setPen(QColor(90, 70, 40, 150))
         for i, (pt, r) in enumerate(nodes):
-            from fluid_plot import _dyn_pad
             lbl = self._data[i]["label"]
             pr  = r + _dyn_pad(r)
             tw  = fm2.horizontalAdvance(lbl)
-            painter.drawText(int(pt.x()-tw/2), int(pt.y()-pr-4), lbl)
+            painter.drawText(int(pt.x() - tw / 2), int(pt.y() - pr - 4), lbl)
+
+        # CPU % in white at centre of each core dot
+        for i, (pt, r) in enumerate(nodes):
+            val = self._data[i]["value"]
+            if r < 10:
+                continue
+            txt       = f"{val:.0f}%"
+            font_size = max(6, min(int(r * 0.55), 11))
+            font      = QFont("Georgia", font_size, QFont.Weight.Bold)
+            painter.setFont(font)
+            fm3 = QFontMetrics(font)
+            tw  = fm3.horizontalAdvance(txt)
+            th  = fm3.ascent()
+            painter.setPen(QColor(255, 255, 255, 220))
+            painter.drawText(int(pt.x() - tw / 2), int(pt.y() + th / 2), txt)
+
+        # Detail panel — drawn last so it's always on top
+        if self._panel_open:
+            draw_detail_box(painter, px, py, pw, ph,
+                            self._panel_proc, self._panel_parent)
 
 
-# ─── Window ──────────────────────────────────────────────────────────────────
+# ─── Standalone window ───────────────────────────────────────────────────────
 
 class ScatterPlotWindow(BaseMonitorWindow):
     def __init__(self):
@@ -319,7 +489,7 @@ class ScatterPlotWindow(BaseMonitorWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self._plot = ScatterPlotWidget()
+        self._plot = ScatterPlotWidget(embedded=False)
         layout.addWidget(self._plot)
 
         self._timer = QTimer()
@@ -340,11 +510,6 @@ class ScatterPlotWindow(BaseMonitorWindow):
 # ─── Entry points for mon.py ─────────────────────────────────────────────────
 
 def open_scatter_plot_window() -> ScatterPlotWindow:
-    """
-    from scatter_plot_window import open_scatter_plot_window
-    win = open_scatter_plot_window()
-    win.show()
-    """
     w = ScatterPlotWindow()
     w.show()
     return w
