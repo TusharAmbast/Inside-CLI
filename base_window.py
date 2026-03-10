@@ -186,8 +186,12 @@ class BaseMonitorWindow(QMainWindow):
             ram_percent = ram.percent
             
             # Get DISK usage
-            disk = psutil.disk_usage('/')
-            disk_percent = disk.percent
+            current_io = psutil.disk_io_counters()
+            bytes_delta = (current_io.read_bytes + current_io.write_bytes) - \
+                        (self._last_disk_io.read_bytes + self._last_disk_io.write_bytes)
+            disk_percent = min(bytes_delta / (500 * 1024 * 1024) * 100, 100)
+            self._last_disk_io = current_io
+            disk_percent = disk_percent
             
             # Update labels with actual values
             self.stat_labels["cpu"].setText(f"CPU: {cpu_percent:.1f}%")
