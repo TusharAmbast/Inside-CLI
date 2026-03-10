@@ -1,3 +1,4 @@
+from operator import index
 import sys
 import psutil
 from collections import deque
@@ -16,6 +17,7 @@ class ClickableLabel(QLabel):
     def mousePressEvent(self, event):
         self.clicked.emit()
 
+disk_path = 'C:\\' if sys.platform == 'win32' else '/'
 
 class SystemUsageWindow(BaseMonitorWindow):
     def __init__(self):
@@ -27,6 +29,7 @@ class SystemUsageWindow(BaseMonitorWindow):
         self.cpu_data  = deque(maxlen=30)
         self.ram_data  = deque(maxlen=30)
         self.disk_data = deque(maxlen=30)
+        self._last_disk_io = psutil.disk_io_counters()
 
         # ── Scatter plot widget ───────────────────────────────────────
         # scatter_plot.py shim sets embedded=True — zero internal padding.
@@ -125,12 +128,20 @@ class SystemUsageWindow(BaseMonitorWindow):
         self.update()
 
     # ── system data collection ────────────────────────────────────────
+    
 
     def collect_usage_data(self):
         try:
-            self.cpu_data.append(psutil.cpu_percent(interval=0))
+            self.cpu_data.append(psutil.cpu_percent(interval=None))
             self.ram_data.append(psutil.virtual_memory().percent)
-            self.disk_data.append(psutil.disk_usage('/').percent)
+            current_io = psutil.disk_io_counters()
+            last_io = self._last_disk_io
+            bytes_delta = (current_io.read_bytes + current_io.write_bytes) - \
+                        (last_io.read_bytes + last_io.write_bytes)
+            # Normalize to 0–100% assuming 500 MB/s as max throughput
+            disk_activity = min(bytes_delta / (500 * 1024 * 1024) * 100, 100)
+            self.disk_data.append(disk_activity)
+            self._last_disk_io = current_io
             self.update()
         except Exception as e:
             print(f"Error collecting usage data: {e}")
@@ -156,7 +167,11 @@ class SystemUsageWindow(BaseMonitorWindow):
             return graph_bottom - (graph_height * (value / 100))
 
         def index_to_x(index):
-            return graph_left + (graph_width * (index / 29.0))
+            n = len(self.cpu_data)
+            # Offset from right: newest point (index n-1) → graph_right
+            # oldest point (index 0) → graph_right - (n-1) * slot_width
+            slot_width = graph_width / 29.0
+            return graph_right - (n - 1 - index) * slot_width
 
         # CPU — filled + line
         points = [(int(index_to_x(i)), int(value_to_y(v)))
