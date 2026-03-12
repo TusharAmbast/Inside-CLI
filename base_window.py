@@ -132,7 +132,7 @@ class BaseMonitorWindow(QMainWindow):
         stats = [
             {
                 "key": "cpu",
-                "text": "CPU :             ",
+                "text": "CPU :                 ",
                 "font_name": "Inter",
                 "base_font_size": self.stat_size,
                 "base_pos": (50, 410),
@@ -142,7 +142,7 @@ class BaseMonitorWindow(QMainWindow):
             },
             {
                 "key": "ram",
-                "text": "RAM :             ",
+                "text": "RAM :                 ",
                 "font_name": "Inter",
                 "base_font_size": self.stat_size,
                 "base_pos": (180, 410),
@@ -152,7 +152,7 @@ class BaseMonitorWindow(QMainWindow):
             },
             {
                 "key": "disk",
-                "text": "DISK :              ",
+                "text": "DISK :                  ",
                 "font_name": "Inter",
                 "base_font_size": self.stat_size ,
                 "base_pos": (310, 410),
