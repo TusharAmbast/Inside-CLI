@@ -41,6 +41,9 @@ class BaseMonitorWindow(QMainWindow):
         # Track which tab is active
         self.active_tab = active_tab
         
+        # ── initialise disk I/O baseline BEFORE the stats timer starts ───
+        self._last_disk_io = psutil.disk_io_counters()
+
         if sys.platform == "darwin":
             font_size = 14
             cli_font_size = 40

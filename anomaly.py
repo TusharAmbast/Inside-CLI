@@ -7,8 +7,8 @@ from PySide6.QtWidgets import (
     QApplication, QLabel, QFrame, QVBoxLayout, QHBoxLayout,
     QPushButton, QScrollArea, QWidget
 )
-from PySide6.QtCore import QTimer, Qt, Signal, QThread, QObject, Slot
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import QTimer, Qt, Signal, QThread, QObject, Slot, QEvent
+from PySide6.QtGui import QColor, QFont, QEnterEvent
 
 from base_window import BaseMonitorWindow
 
@@ -23,6 +23,40 @@ class ClickableLabel(QLabel):
 
     def mousePressEvent(self, event):
         self.clicked.emit()
+
+
+# ==============================================================================
+# HOVER BADGE — shows normal text, switches to action text on hover
+# ==============================================================================
+
+class HoverBadge(QLabel):
+    """
+    A badge label that:
+      - shows `normal_text` by default
+      - switches to `hover_text` when the mouse enters
+      - uses `normal_style` / `hover_style` for visual feedback
+    """
+    def __init__(self, normal_text: str, hover_text: str,
+                 normal_style: str, hover_style: str, parent=None):
+        super().__init__(normal_text, parent)
+        self._normal_text  = normal_text
+        self._hover_text   = hover_text
+        self._normal_style = normal_style
+        self._hover_style  = hover_style
+        self.setStyleSheet(normal_style)
+        self.setAlignment(Qt.AlignCenter)
+        self.setWordWrap(True)
+        self.setMouseTracking(True)
+
+    def enterEvent(self, event):
+        self.setText(self._hover_text)
+        self.setStyleSheet(self._hover_style)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.setText(self._normal_text)
+        self.setStyleSheet(self._normal_style)
+        super().leaveEvent(event)
 
 
 # ==============================================================================
@@ -299,6 +333,7 @@ class AnomalyWindow(BaseMonitorWindow):
     def __init__(self):
         super().__init__(active_tab="ANOMALY")
         self.setWindowTitle("Anomaly - Critique CLI")
+        self._last_anomalies = []
 
         # Build the scrollable card container
         self._build_card_area()
@@ -402,6 +437,7 @@ class AnomalyWindow(BaseMonitorWindow):
     @Slot(list)
     def _update_anomaly_cards(self, anomalies: list):
         """Rebuild the card list every time the worker emits new anomalies."""
+        self._last_anomalies = anomalies
         self._clear_layout(self.card_layout)
 
         if not anomalies:
@@ -419,135 +455,152 @@ class AnomalyWindow(BaseMonitorWindow):
 
     def _make_card(self, anomaly: dict) -> QFrame:
         """
-        Modern polished anomaly card.
+        Anomaly process card — redesigned per spec:
 
-        ┌────────────────────────────────────────────────────────────┐
-        │ ▐█▌  process name (bold, large)        [ teal/red badge ]  │
-        │      CPU consumption is in unusual…    [ End Task ]        │
-        └────────────────────────────────────────────────────────────┘
+        ┌─────────────────────────────────────────────────────────────────┐
+        │  process name  (Inter SemiBold 13px)       ┌──────────────────┐ │
+        │  details text  (Inter Regular  13px)        │ hover badge      │ │
+        │                                             └──────────────────┘ │
+        └─────────────────────────────────────────────────────────────────┘
 
-        Left accent bar tinted teal (safe) or red (critical).
-        Card has a soft white background with a very light drop-shadow
-        effect achieved through layered border colours.
+        Card border : rgb(63, 72, 101) 1px
+        Card bg     : rgb(245, 242, 233)
+        Padding     : left/right 50*scale  top 100*scale  bottom 60*scale
+
+        Hover badge (safe)     : "Process is not important…"  → hover → "END TASK"
+        Hover badge (critical) : "Process is important…"      → hover → "CAN'T END TASK"
         """
         is_safe = anomaly["level"] == "safe"
 
-        accent_color  = "rgb(55, 162, 138)"  if is_safe else "rgb(214, 88, 52)"
-        badge_color   = "rgb(55, 162, 138)"  if is_safe else "rgb(214, 88, 52)"
-        badge_bg_soft = "rgba(55,162,138,0.12)" if is_safe else "rgba(214,88,52,0.10)"
+        # ── scale factor from the window geometry ─────────────────────────
+        sx = self.width()  / self.base_width
+        sy = self.height() / self.base_height
+        scale = (sx + sy) / 2.0          # single uniform scale for padding
 
-        # ── outer wrapper gives us the left accent bar trick ──────
-        # We stack two frames: outer clips, inner is the card body.
-        wrapper = QFrame()
-        wrapper.setMinimumHeight(70)
-        wrapper.setMaximumHeight(95)
-        wrapper.setObjectName("cardWrapper")
-        wrapper.setStyleSheet(f"""
-            QFrame#cardWrapper {{
-                background-color: {accent_color};
-                border-radius: 16px;
+        pad_lr  = int(50  * scale)
+        pad_top = int(10  * scale)
+        pad_bot = int(10  * scale)
+
+        # ── colour scheme ─────────────────────────────────────────────────
+        CARD_BG     = "rgb(245, 242, 233)"
+        CARD_BORDER = "rgb(63, 72, 101)"
+
+        BADGE_BORDER = "rgb(63, 72, 101)"
+        BADGE_TEXT   = "rgb(254, 243, 215)"
+
+        if is_safe:
+            badge_color      = "rgb(56, 171, 142)"
+            hover_text       = "END TASK"
+            normal_badge_txt = "Process is not important\ncan be removed for\nCPU RELAXATION"
+        else:
+            badge_color      = "rgb(222, 96, 58)"
+            hover_text       = "CAN'T END TASK"
+            normal_badge_txt = "Process is important\ncannot be removed for\nCPU RELAXATION"
+
+        # ── card frame ────────────────────────────────────────────────────
+        card = QFrame()
+        card.setObjectName("anomalyCard")
+        card.setFixedHeight(int(70 * scale))
+        card.setStyleSheet(f"""
+            QFrame#anomalyCard {{
+                background-color: {CARD_BG};
+                border: 1px solid {CARD_BORDER};
+                border-radius: 12px;
             }}
         """)
 
-        wrapper_row = QHBoxLayout(wrapper)
-        wrapper_row.setContentsMargins(5, 0, 0, 0)   # 5px left → accent bar width
-        wrapper_row.setSpacing(0)
-
-        # ── inner card body ───────────────────────────────────────
-        card = QFrame()
-        card.setObjectName("cardBody")
-        card.setStyleSheet("""
-            QFrame#cardBody {
-                background-color: #FEFCF4;
-                border-radius: 13px;
-            }
-        """)
-
-        wrapper_row.addWidget(card)
-
         body = QHBoxLayout(card)
-        body.setContentsMargins(18, 10, 16, 10)
-        body.setSpacing(14)
+        body.setContentsMargins(pad_lr, pad_top, pad_lr, pad_bot)
+        body.setSpacing(int(16 * scale))
 
-        # ── left: name + description ──────────────────────────────
+        # ── left: name + description ──────────────────────────────────────
         left = QVBoxLayout()
-        left.setSpacing(4)
+        left.setSpacing(int(4 * scale))
         left.setContentsMargins(0, 0, 0, 0)
 
+        name_font_size = max(1, int(13 * scale))
         name_lbl = QLabel(anomaly["name"])
-        name_lbl.setFont(QFont("Inter", 12, QFont.Weight.Bold))
+        name_font = QFont("Inter", name_font_size)
+        name_font.setWeight(QFont.Weight.DemiBold)
+        name_lbl.setFont(name_font)
         name_lbl.setStyleSheet(
-            "color: rgb(33, 40, 66); background: transparent; border: none;"
+            f"color: {CARD_BORDER}; background: transparent; border: none;"
         )
 
+        desc_font_size = max(1, int(13 * scale))
         desc_lbl = QLabel(anomaly["desc"])
-        desc_lbl.setFont(QFont("Inter", 9))
+        desc_lbl.setFont(QFont("Inter", desc_font_size, QFont.Weight.Normal))
         desc_lbl.setStyleSheet(
-            "color: rgba(63, 72, 101, 0.60); background: transparent; border: none;"
+            "color: rgba(63, 72, 101, 0.65); background: transparent; border: none;"
         )
         desc_lbl.setWordWrap(True)
 
-        left.addStretch()
         left.addWidget(name_lbl)
         left.addWidget(desc_lbl)
         left.addStretch()
 
-        # ── right: soft-tinted badge + optional End Task ──────────
+        # ── right: hover badge ────────────────────────────────────────────
         right = QVBoxLayout()
-        right.setSpacing(8)
+        right.setSpacing(0)
         right.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
         right.setContentsMargins(0, 0, 0, 0)
 
-        badge = QLabel()
-        badge.setFixedWidth(152)
-        badge.setMinimumHeight(46)
-        badge.setWordWrap(True)
-        badge.setAlignment(Qt.AlignCenter)
-        badge.setFont(QFont("Inter", 8, QFont.Weight.DemiBold))
+        badge_font_size        = max(1, int(11 * scale))
+        badge_font_size_hover  = max(1, int(13 * scale))
+        badge_radius           = max(1, int(10 * scale))
+        badge_pad              = max(1, int(8 * scale))
+        badge_width            = max(1, int(170 * scale))
+        badge_height           = max(1, int(52  * scale))
+
+        normal_style = f"""
+            QLabel {{
+                background-color: {badge_color};
+                color: {BADGE_TEXT};
+                border-radius: {badge_radius}px;
+                border: 1px solid {BADGE_BORDER};
+                padding: {badge_pad}px {badge_pad}px {badge_pad}px {badge_pad}px;
+                font-family: Inter;
+                font-size: {badge_font_size}px;
+                font-weight: 600;
+            }}
+        """
+        hover_style = f"""
+            QLabel {{
+                background-color: {badge_color};
+                color: {BADGE_TEXT};
+                border-radius: {badge_radius}px;
+                border: 1px solid {BADGE_BORDER};
+                padding: {badge_pad}px {badge_pad}px {badge_pad}px {badge_pad}px;
+                font-family: Inter;
+                font-size: {badge_font_size_hover}px;
+                font-weight: 700;
+                letter-spacing: 0.5px;
+            }}
+        """
+
+        badge = HoverBadge(
+            normal_text=normal_badge_txt,
+            hover_text=hover_text,
+            normal_style=normal_style,
+            hover_style=hover_style,
+        )
+        badge.setFixedWidth(badge_width)
+        badge.setFixedHeight(badge_height)
+        badge.setFont(QFont("Inter", badge_font_size, QFont.Weight.DemiBold))
 
         if is_safe:
-            badge.setText("Process is not important\ncan be removed for\nCPU RELAXATION")
-        else:
-            badge.setText("Process is important\ncannot be removed for\nCPU RELAXATION")
-
-        badge.setStyleSheet(f"""
-            QLabel {{
-                background-color: {badge_bg_soft};
-                color: {badge_color};
-                border-radius: 10px;
-                border: 1.5px solid {badge_color};
-                padding: 6px 10px;
-            }}
-        """)
+            badge.setCursor(Qt.PointingHandCursor)
+            badge.mousePressEvent = (
+                lambda _, pid=anomaly["pid"]:
+                self.worker.killProcess.emit(pid)
+            )
 
         right.addWidget(badge, 0, Qt.AlignRight)
-
-        if is_safe:
-            kill_btn = QPushButton("End Task")
-            kill_btn.setFixedWidth(152)
-            kill_btn.setFixedHeight(30)
-            kill_btn.setFont(QFont("Inter", 9, QFont.Weight.DemiBold))
-            kill_btn.setCursor(Qt.PointingHandCursor)
-            kill_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {badge_color};
-                    color: #ffffff;
-                    border-radius: 8px;
-                    border: none;
-                    letter-spacing: 0.5px;
-                }}
-                QPushButton:hover   {{ background-color: rgb(190, 65, 30); }}
-                QPushButton:pressed {{ background-color: rgb(155, 50, 20); }}
-            """)
-            kill_btn.clicked.connect(
-                lambda _, pid=anomaly["pid"]: self.worker.killProcess.emit(pid)
-            )
-            right.addWidget(kill_btn, 0, Qt.AlignRight)
 
         body.addLayout(left,  3)
         body.addLayout(right, 1)
 
-        return wrapper
+        return card
 
     # ------------------------------------------------------------------
     # HELPERS
@@ -579,6 +632,8 @@ class AnomalyWindow(BaseMonitorWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_scroll_area()
+        if hasattr(self, '_last_anomalies') and self._last_anomalies:
+            self._update_anomaly_cards(self._last_anomalies)
 
     # ------------------------------------------------------------------
     # paintEvent — no graph, just let BaseMonitorWindow draw its chrome
@@ -602,4 +657,48 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = AnomalyWindow()
     window.show()
+
+    # ── FAKE ANOMALIES for UI testing ─────────────────────────────────────
+    FAKE_ANOMALIES = [
+        {
+            "pid":   1001,
+            "name":  "chrome.exe",
+            "desc":  "CPU consumption is in unusual range. Please check this process.",
+            "level": "safe",
+        },
+        {
+            "pid":   1002,
+            "name":  "systemd",
+            "desc":  "CPU consumption is in unusual range. Please check this process.",
+            "level": "critical",
+        },
+        {
+            "pid":   1003,
+            "name":  "ffmpeg",
+            "desc":  "CPU consumption is in unusual range. Please check this process.",
+            "level": "safe",
+        },
+        {
+            "pid":   1004,
+            "name":  "svchost.exe",
+            "desc":  "CPU consumption is in unusual range. Please check this process.",
+            "level": "critical",
+        },
+        {
+            "pid":   1005,
+            "name":  "lsass.exe",
+            "desc":  "CPU consumption is in unusual range. Please check this process.",
+            "level": "critical",
+        },
+        {
+            "pid":   1006,
+            "name":  "kernel_task",
+            "desc":  "CPU consumption is in unusual range. Please check this process.",
+            "level": "critical",
+        },
+    ]
+    # Inject after a short delay so the window has fully rendered
+    QTimer.singleShot(300, lambda: window._update_anomaly_cards(FAKE_ANOMALIES))
+    # ─────────────────────────────────────────────────────────────────────
+
     sys.exit(app.exec())
