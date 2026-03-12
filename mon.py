@@ -7,7 +7,7 @@ from PySide6.QtCore import Signal, Qt, QTimer, QPoint, QRect
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygon
 
 from base_window import BaseMonitorWindow
-from scatter_plot import ScatterPlotWidget, ProcessDataProcessor
+from scatter_plot import ScatterPlotElement, ProcessDataProcessor
 
 
 class ClickableLabel(QLabel):
@@ -31,11 +31,10 @@ class SystemUsageWindow(BaseMonitorWindow):
         self.disk_data = deque(maxlen=30)
         self._last_disk_io = psutil.disk_io_counters()
 
-        # ── Scatter plot widget ───────────────────────────────────────
-        # scatter_plot.py shim sets embedded=True — zero internal padding.
-        # mon.py owns the geometry via _reposition_scatter().
-        self._scatter = ScatterPlotWidget(parent=self, embedded=True)
-        self._scatter.hide()
+        # ── Scatter plot element ──────────────────────────────────────
+        # ScatterPlotElement is not a widget — it draws directly onto
+        # this window's painter when active_tab == "SCATTER PLOT".
+        self._scatter = ScatterPlotElement(parent=self)
 
         # Data refresh timer for scatter (every 2 s)
         self._scatter_timer = QTimer(self)
@@ -56,29 +55,25 @@ class SystemUsageWindow(BaseMonitorWindow):
             processed  = ProcessDataProcessor.process_pipeline()
             fluid_data = ProcessDataProcessor.to_fluid_data(processed)
             if fluid_data:
-                self._scatter.set_data(fluid_data)
+                px, py, pw, ph = self._scatter_rect()
+                self._scatter.set_data(fluid_data, px, py, pw, ph)
         except Exception as e:
             print(f"[scatter refresh] {e}")
 
-    # ── tab geometry helpers ──────────────────────────────────────────
+    # ── plot rect helper ──────────────────────────────────────────────
 
-    def _plot_rect(self) -> QRect:
+    def _scatter_rect(self):
         """
-        Returns the QRect of the plot area using the same margin logic
-        as paintEvent, so the child widget sits exactly inside it.
+        Returns (px, py, pw, ph) — the plot area in window coords.
+        Matches the margin logic used in paintEvent.
         """
         w, h  = self.width(), self.height()
         scale = min(w / self.base_width, h / self.base_height)
         ml = int(50 * scale)
         mr = int(50 * scale)
-        mt = int(100 * scale)
-        mb = int(60 * scale)
-        return QRect(ml, mt, w - ml - mr, h - mt - mb)
-
-    def _reposition_scatter(self):
-        """Move/resize the scatter widget to fill the current plot area."""
-        r = self._plot_rect()
-        self._scatter.setGeometry(r)
+        mt = int((100 + self._title_bar_offset) * scale)
+        mb = int(85 * scale)
+        return ml, mt, w - ml - mr, h - mt - mb
 
     # ── tab switching ─────────────────────────────────────────────────
 
@@ -116,19 +111,13 @@ class SystemUsageWindow(BaseMonitorWindow):
                 elem["opacity"] = 1.0 if elem["text"] == tab_name else 0.4
 
         if tab_name == "SCATTER PLOT":
-            self._reposition_scatter()
-            self._scatter.show()
-            self._scatter.raise_()
             if not self._scatter._data:
                 self._refresh_scatter()
-        else:
-            self._scatter.hide()
 
         self.update_layout()
         self.update()
 
     # ── system data collection ────────────────────────────────────────
-    
 
     def collect_usage_data(self):
         try:
@@ -138,7 +127,6 @@ class SystemUsageWindow(BaseMonitorWindow):
             last_io = self._last_disk_io
             bytes_delta = (current_io.read_bytes + current_io.write_bytes) - \
                         (last_io.read_bytes + last_io.write_bytes)
-            # Normalize to 0–100% assuming 500 MB/s as max throughput
             disk_activity = min(bytes_delta / (500 * 1024 * 1024) * 100, 100)
             self.disk_data.append(disk_activity)
             self._last_disk_io = current_io
@@ -150,8 +138,18 @@ class SystemUsageWindow(BaseMonitorWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        px, py, pw, ph = self._scatter_rect()
+        self._scatter.handle_resize(px, py, pw, ph)
+
+    # ── mouse ─────────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
         if self.active_tab == "SCATTER PLOT":
-            self._reposition_scatter()
+            mx, my = event.position().x(), event.position().y()
+            px, py, pw, ph = self._scatter_rect()
+            self._scatter.handle_click(mx, my, px, py, pw, ph)
+        else:
+            super().mousePressEvent(event)
 
     # ── drawing ───────────────────────────────────────────────────────
 
@@ -168,8 +166,6 @@ class SystemUsageWindow(BaseMonitorWindow):
 
         def index_to_x(index):
             n = len(self.cpu_data)
-            # Offset from right: newest point (index n-1) → graph_right
-            # oldest point (index 0) → graph_right - (n-1) * slot_width
             slot_width = graph_width / 29.0
             return graph_right - (n - 1 - index) * slot_width
 
@@ -240,6 +236,8 @@ class SystemUsageWindow(BaseMonitorWindow):
             mkc = 4
 
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
         if self.active_tab == "SYSTEM USAGE":
             label_opacity = 0.6
             line_opacity  = 0.6
@@ -286,6 +284,11 @@ class SystemUsageWindow(BaseMonitorWindow):
 
             self.draw_usage_plots(painter, graph_left, graph_right,
                                   graph_top, graph_bottom)
+
+        elif self.active_tab == "SCATTER PLOT":
+            # Draw scatter directly onto this window's painter
+            px, py, pw, ph = self._scatter_rect()
+            self._scatter.draw(painter, px, py, pw, ph)
 
         elif self.active_tab == "ANOMALY":
             painter.setPen(QColor(63, 72, 101))

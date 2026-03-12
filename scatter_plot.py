@@ -1,5 +1,5 @@
 """
-scatter_plot_window.py
+scatter_plot.py
 ─────────────────────────────────────────────────────────────────────────────
 Owns layout, padding, animation, data pipeline, labels.
 Delegates blob/belt drawing to FluidRenderer from fluid_plot.py.
@@ -12,6 +12,15 @@ Fixes applied
                On refresh, only Y and radius update (LERP). Nodes never
                jump or re-randomize their horizontal position.
 3. NO SPLINE — skeleton line removed from FluidRenderer entirely.
+
+ScatterPlotElement
+──────────────────
+A non-widget element that can be drawn directly onto any QPainter.
+mon.py owns the geometry and calls:
+  - element.set_data(fluid_data)
+  - element.draw(painter, px, py, pw, ph)
+  - element.handle_click(mx, my, px, py, pw, ph)
+  - element.handle_resize(px, py, pw, ph)
 """
 
 import sys
@@ -19,7 +28,7 @@ import psutil
 from collections import defaultdict
 
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
-from PySide6.QtCore    import Qt, QTimer, QPointF
+from PySide6.QtCore    import Qt, QTimer, QPointF, QObject
 from PySide6.QtGui     import QPainter, QColor, QPen, QFont, QFontMetrics
 
 from base_window      import BaseMonitorWindow
@@ -36,17 +45,11 @@ PAD_BOTTOM =  60
 PAD_LEFT   =  50
 PAD_RIGHT  =  50
 
-# Largest blob outer radius = R_MAX + dyn_pad(R_MAX)
-# _EDGE_INSET pushes every node centre inward so even the biggest blob
-# stays exactly 5 px away from the top/bottom/left/right divider lines.
 R_MAX        = 30
-_BLOB_MAX    = int(R_MAX + _dyn_pad(R_MAX))   # max outer radius ≈ 57 px
-_EDGE_INSET  = _BLOB_MAX + 5                  # 5 px clearance from lines
+_BLOB_MAX    = int(R_MAX + _dyn_pad(R_MAX))
+_EDGE_INSET  = _BLOB_MAX + 5
 
-# Gap between user groups along X
 USER_GROUP_GAP = 50
-
-# Radius range mapped from cpu %
 R_MIN = 12
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
@@ -93,7 +96,6 @@ class ProcessDataProcessor:
         for user, data in user_data.items():
             filtered = [p for p in data['processes']
                         if p['cpu_percent'] >= process_cpu_threshold]
-            # Sort highest CPU first within each user
             result[user] = sorted(filtered,
                                   key=lambda x: x['cpu_percent'], reverse=True)
         return result
@@ -116,7 +118,6 @@ class ProcessDataProcessor:
         """
         flat = []
         for user, procs in sorted(processed.items()):
-            # Alphabetical sort — fixes X order permanently
             for p in sorted(procs, key=lambda x: x['name'].lower()):
                 flat.append({
                     "label": p['name'][:12],
@@ -133,14 +134,6 @@ def _value_to_radius(t: float) -> float:
 
 
 def _assign_x_slots(data: list[dict], plot_x: int, plot_w: int) -> dict:
-    """
-    Assign a FIXED X coordinate to every unique (user, label) pair.
-    Order is alphabetical within each user group — matching to_fluid_data.
-
-    Left edge  : first node centre = plot_x + outer_radius(first) + 5
-    Right edge : last  node centre = plot_x + plot_w - outer_radius(last) - 5
-    This guarantees every blob sits exactly 5 px from the divider lines.
-    """
     user_order: list[str]            = []
     groups:     dict[str, list[str]] = {}
 
@@ -155,13 +148,11 @@ def _assign_x_slots(data: list[dict], plot_x: int, plot_w: int) -> dict:
     for u in user_order:
         groups[u].sort(key=str.lower)
 
-    # Build ordered list of (user, label) and their normalised values
     ordered = []
     values  = [d["value"] for d in data]
     v_min   = min(values);  v_max = max(values)
     v_range = v_max - v_min or 1.0
 
-    # value lookup: (user, label) → latest value
     val_map = {(d["user"], d["label"]): d["value"] for d in data}
 
     for u in user_order:
@@ -178,9 +169,7 @@ def _assign_x_slots(data: list[dict], plot_x: int, plot_w: int) -> dict:
         r = _value_to_radius(t)
         return r + _dyn_pad(r)
 
-    # First node: its centre must be at least outer_r + 5 from left line
     x_start = plot_x + _outer(ordered[0]) + 5
-    # Last node: its centre must be at least outer_r + 5 from right line
     x_end   = plot_x + plot_w - _outer(ordered[-1]) - 5
 
     n_gaps   = len(user_order) - 1
@@ -199,10 +188,6 @@ def _assign_x_slots(data: list[dict], plot_x: int, plot_w: int) -> dict:
 
 def _compute_targets(data: list[dict], x_slots: dict,
                      plot_y: int, plot_h: int) -> list[tuple]:
-    """
-    Build target (QPointF, radius) using stable X slots.
-    Y: high value node sits 5px below top line, low value sits 5px above bottom line.
-    """
     if not data:
         return []
 
@@ -218,8 +203,6 @@ def _compute_targets(data: list[dict], x_slots: dict,
 
         x = x_slots.get((d["user"], d["label"]), plot_y)
 
-        # y_top_centre  : highest possible centre (blob top = plot_y + 5)
-        # y_bot_centre  : lowest  possible centre (blob bot = plot_y + plot_h - 5)
         y_top = plot_y  + pr + 5
         y_bot = plot_y  + plot_h - pr - 5
         y = y_top + (y_bot - y_top) * (1.0 - t)
@@ -229,26 +212,26 @@ def _compute_targets(data: list[dict], x_slots: dict,
     return nodes
 
 
-# ─── Widget ──────────────────────────────────────────────────────────────────
+# ─── ScatterPlotElement ──────────────────────────────────────────────────────
 
-class ScatterPlotWidget(QWidget):
+class ScatterPlotElement(QObject):
     """
-    Plot canvas.
-    - Blob area: full width when panel closed, shrinks by BOX_W+BOX_GAP when open.
-    - Blobs LERP into the narrowed space when panel opens, and back on close.
-    - Detail panel is drawn at a fixed right position inside the plot area.
-    - Click blob → open panel. Click anywhere outside panel → close.
+    A non-widget scatter plot element.
 
-    embedded=True  (used by mon.py): widget is already placed at the plot rect,
-                   so internal padding is 0 on all sides.
-    embedded=False (standalone ScatterPlotWindow): widget fills the whole window,
-                   so internal padding carves out the plot area.
+    mon.py owns the geometry. This class holds all state and exposes:
+      draw(painter, px, py, pw, ph)        — paint onto mon.py's painter
+      handle_click(mx, my, px, py, pw, ph) — forward mouse events
+      handle_resize(px, py, pw, ph)        — call on window resize
+      set_data(fluid_data)                 — update data
+
+    The animation timer calls parent.update() so mon.py repaints.
     """
 
-    def __init__(self, parent=None, embedded: bool = False):
+    def __init__(self, parent=None):
         super().__init__(parent)
 
-        self._embedded      : bool       = embedded
+        self._parent = parent
+
         self._data          : list[dict] = []
         self._color_map     : dict       = {}
         self._x_slots       : dict       = {}
@@ -256,15 +239,220 @@ class ScatterPlotWidget(QWidget):
         self._target_nodes  : list       = []
 
         # Detail panel state
-        self._panel_open    : bool       = False
-        self._panel_proc    : str        = ""
-        self._panel_parent  : str        = ""
+        self._panel_open    : bool = False
+        self._panel_proc    : str  = ""
+        self._panel_parent  : str  = ""
 
+        # Animation timer — triggers parent repaint at ~60 fps
         self._anim = QTimer(self)
         self._anim.timeout.connect(self._step)
         self._anim.start(16)
 
-    # ── public ───────────────────────────────────────────────────────
+    # ── public API ───────────────────────────────────────────────────
+
+    def set_data(self, data: list[dict], px: int, py: int,
+                 pw: int, ph: int):
+        self._data      = data
+        self._color_map = build_color_map(data)
+        blob_pw         = self._blob_plot_w(pw)
+        new_slots = _assign_x_slots(data, px, blob_pw)
+        for key, x in new_slots.items():
+            if key not in self._x_slots:
+                self._x_slots[key] = x
+        self._rebuild_targets(px, py, pw, ph)
+
+    def handle_resize(self, px: int, py: int, pw: int, ph: int):
+        if self._data:
+            self._rebuild_targets(px, py, pw, ph)
+
+    def handle_click(self, mx: float, my: float,
+                     px: int, py: int, pw: int, ph: int):
+        if self._panel_open:
+            bx, by, bw, bh = box_rect(px, py, pw, ph)
+            if bx <= mx <= bx + bw and by <= my <= by + bh:
+                return   # click inside panel — ignore
+            self._panel_open = False
+            self._rebuild_targets(px, py, pw, ph)
+            self._request_update()
+            return
+
+        idx = self._hit_node(mx, my)
+        if 0 <= idx < len(self._data):
+            d = self._data[idx]
+            self._panel_proc   = d["label"]
+            self._panel_parent = self._get_parent_name(d["label"])
+            self._panel_open   = True
+            self._rebuild_targets(px, py, pw, ph)
+            self._request_update()
+
+    def draw(self, painter: QPainter, px: int, py: int,
+             pw: int, ph: int):
+        """
+        Paint the full scatter plot into the given plot rect.
+        Called from mon.py's paintEvent when active_tab == "SCATTER PLOT".
+        """
+        plot_bottom = py + ph
+
+        # Background — fill only the plot area
+        painter.fillRect(px, py, pw, ph, BG_COLOR)
+
+        # Horizontal ruled lines
+        painter.setPen(QPen(GRID_COLOR, 1))
+        for i in range(11):
+            gy = int(py + ph * i / 10)
+            painter.drawLine(px, gy, px + pw, gy)
+
+        # Top / bottom dividers
+        painter.setPen(QPen(DIVIDER, 1))
+        painter.drawLine(px, py,          px + pw, py)
+        painter.drawLine(px, plot_bottom, px + pw, plot_bottom)
+
+        nodes = self._current_nodes
+        if not nodes:
+            painter.setPen(QColor(160, 140, 100, 120))
+            painter.setFont(QFont("Georgia", 11, QFont.Weight.Normal, True))
+            painter.drawText(px, py, pw, ph,
+                             Qt.AlignmentFlag.AlignCenter, "No data")
+            return
+
+        # Fluid blobs + belts
+        FluidRenderer(painter, nodes, self._data, self._color_map).draw()
+
+        # Username labels centred under each user group
+        painter.setFont(QFont("Georgia", 10, QFont.Weight.Normal, True))
+        fm = QFontMetrics(painter.font())
+        label_y = plot_bottom + 26
+
+        groups: dict[str, list] = {}
+        for i, (pt, _) in enumerate(nodes):
+            groups.setdefault(self._data[i]["user"], []).append(pt.x())
+
+        for u, xs in groups.items():
+            blob, _ = self._color_map.get(u, (QColor(254, 197, 110),
+                                              QColor(193, 52, 40)))
+            mid = (min(xs) + max(xs)) / 2
+            uw  = fm.horizontalAdvance(u)
+            painter.setPen(blob.darker(160))
+            painter.drawText(int(mid - uw / 2), label_y, u)
+
+        # Process name above each blob
+        painter.setFont(QFont("Georgia", 7))
+        fm2 = QFontMetrics(painter.font())
+        painter.setPen(QColor(90, 70, 40, 150))
+        for i, (pt, r) in enumerate(nodes):
+            lbl = self._data[i]["label"]
+            pr  = r + _dyn_pad(r)
+            tw  = fm2.horizontalAdvance(lbl)
+            painter.drawText(int(pt.x() - tw / 2), int(pt.y() - pr - 4), lbl)
+
+        # CPU % in white at centre of each blob
+        for i, (pt, r) in enumerate(nodes):
+            val = self._data[i]["value"]
+            if r < 10:
+                continue
+            txt       = f"{val:.0f}%"
+            font_size = max(6, min(int(r * 0.55), 11))
+            font      = QFont("Georgia", font_size, QFont.Weight.Bold)
+            painter.setFont(font)
+            fm3 = QFontMetrics(font)
+            tw  = fm3.horizontalAdvance(txt)
+            th  = fm3.ascent()
+            painter.setPen(QColor(255, 255, 255, 220))
+            painter.drawText(int(pt.x() - tw / 2), int(pt.y() + th / 2), txt)
+
+        # Detail panel — drawn last so it's always on top
+        if self._panel_open:
+            draw_detail_box(painter, px, py, pw, ph,
+                            self._panel_proc, self._panel_parent)
+
+    # ── internal ─────────────────────────────────────────────────────
+
+    def _blob_plot_w(self, plot_w: int) -> int:
+        if self._panel_open:
+            return plot_w - BOX_W - BOX_GAP
+        return plot_w
+
+    def _rebuild_targets(self, px: int, py: int, pw: int, ph: int):
+        blob_pw        = self._blob_plot_w(pw)
+        self._x_slots  = _assign_x_slots(self._data, px, blob_pw)
+        targets = _compute_targets(self._data, self._x_slots, py, ph)
+        if len(targets) != len(self._current_nodes):
+            self._current_nodes = [(QPointF(p.x(), p.y()), r)
+                                   for p, r in targets]
+        self._target_nodes = targets
+        self._request_update()
+
+    def _step(self):
+        if len(self._current_nodes) != len(self._target_nodes):
+            return
+        moved = False
+        s = 0.06
+        for i in range(len(self._current_nodes)):
+            cp, cr = self._current_nodes[i]
+            tp, tr = self._target_nodes[i]
+            nx = cp.x() + (tp.x() - cp.x()) * s
+            ny = cp.y() + (tp.y() - cp.y()) * s
+            nr = cr     + (tr - cr) * s
+            self._current_nodes[i] = (QPointF(nx, ny), nr)
+            if abs(tp.x()-nx) > 0.4 or abs(tp.y()-ny) > 0.4 or abs(tr-nr) > 0.05:
+                moved = True
+        if moved:
+            self._request_update()
+
+    def _request_update(self):
+        """Ask the parent window to repaint."""
+        if self._parent is not None:
+            self._parent.update()
+
+    def _hit_node(self, mx: float, my: float) -> int:
+        for i, (pt, r) in enumerate(self._current_nodes):
+            pr = r + _dyn_pad(r)
+            dx = mx - pt.x();  dy = my - pt.y()
+            if dx*dx + dy*dy <= pr*pr:
+                return i
+        return -1
+
+    @staticmethod
+    def _get_parent_name(proc_name: str) -> str:
+        try:
+            for proc in psutil.process_iter(['name', 'ppid']):
+                if proc.info['name'] == proc_name:
+                    ppid = proc.info['ppid']
+                    if ppid:
+                        try:
+                            return psutil.Process(ppid).name()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            return "—"
+        except Exception:
+            pass
+        return "—"
+
+
+# ─── Standalone window (unchanged) ───────────────────────────────────────────
+
+class ScatterPlotWidget(QWidget):
+    """
+    Kept for ScatterPlotWindow standalone use.
+    Not used by mon.py anymore — mon.py uses ScatterPlotElement instead.
+    """
+
+    def __init__(self, parent=None, embedded: bool = False):
+        super().__init__(parent)
+
+        self._embedded      = embedded
+        self._data          : list[dict] = []
+        self._color_map     : dict       = {}
+        self._x_slots       : dict       = {}
+        self._current_nodes : list       = []
+        self._target_nodes  : list       = []
+
+        self._panel_open    : bool = False
+        self._panel_proc    : str  = ""
+        self._panel_parent  : str  = ""
+
+        self._anim = QTimer(self)
+        self._anim.timeout.connect(self._step)
+        self._anim.start(16)
 
     def set_data(self, data: list[dict]):
         self._data      = data
@@ -277,14 +465,7 @@ class ScatterPlotWidget(QWidget):
                 self._x_slots[key] = x
         self._rebuild_targets()
 
-    # ── internal ─────────────────────────────────────────────────────
-
     def _plot_rect(self):
-        """
-        Full plot area in widget-local coordinates.
-        Embedded: widget sits exactly at the plot rect already → no padding.
-        Standalone: widget fills the whole window → carve out with PAD_*.
-        """
         w, h = self.width(), self.height()
         if self._embedded:
             return (0, 0, w, h)
@@ -293,10 +474,6 @@ class ScatterPlotWidget(QWidget):
                 h - PAD_TOP  - PAD_BOTTOM)
 
     def _blob_plot_w(self, plot_w: int) -> int:
-        """
-        Width available for blobs.
-        When panel is open the right portion is reserved for the box.
-        """
         if self._panel_open:
             return plot_w - BOX_W - BOX_GAP
         return plot_w
@@ -304,7 +481,6 @@ class ScatterPlotWidget(QWidget):
     def _rebuild_targets(self):
         px, py, pw, ph = self._plot_rect()
         blob_pw        = self._blob_plot_w(pw)
-        # Recompute ALL x slots fresh so blobs spread into the new width
         self._x_slots  = _assign_x_slots(self._data, px, blob_pw)
         targets = _compute_targets(self._data, self._x_slots, py, ph)
         if len(targets) != len(self._current_nodes):
@@ -339,7 +515,6 @@ class ScatterPlotWidget(QWidget):
         return -1
 
     def _panel_rect(self):
-        """Returns (x, y, w, h) of the detail box in widget coords, or None."""
         if not self._panel_open:
             return None
         px, py, pw, ph = self._plot_rect()
@@ -360,32 +535,25 @@ class ScatterPlotWidget(QWidget):
             pass
         return "—"
 
-    # ── events ───────────────────────────────────────────────────────
-
     def mousePressEvent(self, event):
         mx, my = event.position().x(), event.position().y()
-
-        # If panel is open: click inside panel = ignore; outside = close
         if self._panel_open:
             pr = self._panel_rect()
             if pr:
                 bx, by, bw, bh = pr
                 if bx <= mx <= bx + bw and by <= my <= by + bh:
-                    return   # inside panel — do nothing
-            # Outside panel → close it and let blobs expand back
+                    return
             self._panel_open = False
             self._rebuild_targets()
             self.update()
             return
-
-        # Panel closed: check if a blob was hit
         idx = self._hit_node(mx, my)
         if 0 <= idx < len(self._data):
             d = self._data[idx]
             self._panel_proc   = d["label"]
             self._panel_parent = self._get_parent_name(d["label"])
             self._panel_open   = True
-            self._rebuild_targets()   # narrows blob area → blobs LERP left
+            self._rebuild_targets()
             self.update()
 
     def resizeEvent(self, e):
@@ -393,49 +561,33 @@ class ScatterPlotWidget(QWidget):
             self._rebuild_targets()
         super().resizeEvent(e)
 
-    # ── paint ────────────────────────────────────────────────────────
-
     def paintEvent(self, _):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-
         px, py, pw, ph = self._plot_rect()
         plot_bottom    = py + ph
-
-        # Background
         painter.fillRect(0, 0, w, h, BG_COLOR)
-
-        # Horizontal ruled lines — always span FULL plot width
         painter.setPen(QPen(GRID_COLOR, 1))
         for i in range(11):
             gy = int(py + ph * i / 10)
             painter.drawLine(px, gy, px + pw, gy)
-
-        # Top / bottom dividers — full width
         painter.setPen(QPen(DIVIDER, 1))
         painter.drawLine(px, py,          px + pw, py)
         painter.drawLine(px, plot_bottom, px + pw, plot_bottom)
-
         nodes = self._current_nodes
         if not nodes:
             painter.setPen(QColor(160, 140, 100, 120))
             painter.setFont(QFont("Georgia", 11, QFont.Weight.Normal, True))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No data")
             return
-
-        # Fluid blobs + belts
         FluidRenderer(painter, nodes, self._data, self._color_map).draw()
-
-        # Username labels centred under each user group
         painter.setFont(QFont("Georgia", 10, QFont.Weight.Normal, True))
         fm = QFontMetrics(painter.font())
         label_y = plot_bottom + 26
-
         groups: dict[str, list] = {}
         for i, (pt, _) in enumerate(nodes):
             groups.setdefault(self._data[i]["user"], []).append(pt.x())
-
         for u, xs in groups.items():
             blob, _ = self._color_map.get(u, (QColor(254, 197, 110),
                                               QColor(193, 52, 40)))
@@ -443,8 +595,6 @@ class ScatterPlotWidget(QWidget):
             uw  = fm.horizontalAdvance(u)
             painter.setPen(blob.darker(160))
             painter.drawText(int(mid - uw / 2), label_y, u)
-
-        # Process name above each blob (small, muted)
         painter.setFont(QFont("Georgia", 7))
         fm2 = QFontMetrics(painter.font())
         painter.setPen(QColor(90, 70, 40, 150))
@@ -453,8 +603,6 @@ class ScatterPlotWidget(QWidget):
             pr  = r + _dyn_pad(r)
             tw  = fm2.horizontalAdvance(lbl)
             painter.drawText(int(pt.x() - tw / 2), int(pt.y() - pr - 4), lbl)
-
-        # CPU % in white at centre of each core dot
         for i, (pt, r) in enumerate(nodes):
             val = self._data[i]["value"]
             if r < 10:
@@ -468,14 +616,10 @@ class ScatterPlotWidget(QWidget):
             th  = fm3.ascent()
             painter.setPen(QColor(255, 255, 255, 220))
             painter.drawText(int(pt.x() - tw / 2), int(pt.y() + th / 2), txt)
-
-        # Detail panel — drawn last so it's always on top
         if self._panel_open:
             draw_detail_box(painter, px, py, pw, ph,
                             self._panel_proc, self._panel_parent)
 
-
-# ─── Standalone window ───────────────────────────────────────────────────────
 
 class ScatterPlotWindow(BaseMonitorWindow):
     def __init__(self):
@@ -506,8 +650,6 @@ class ScatterPlotWindow(BaseMonitorWindow):
         except Exception as e:
             print(f"[ScatterPlotWindow] {e}")
 
-
-# ─── Entry points for mon.py ─────────────────────────────────────────────────
 
 def open_scatter_plot_window() -> ScatterPlotWindow:
     w = ScatterPlotWindow()
