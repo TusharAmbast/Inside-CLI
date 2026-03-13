@@ -41,6 +41,9 @@ class BaseMonitorWindow(QMainWindow):
         # Track which tab is active
         self.active_tab = active_tab
         
+        # ── initialise disk I/O baseline BEFORE the stats timer starts ───
+        self._last_disk_io = psutil.disk_io_counters()
+
         if sys.platform == "darwin":
             font_size = 14
             cli_font_size = 40
@@ -131,7 +134,7 @@ class BaseMonitorWindow(QMainWindow):
         stats = [
             {
                 "key": "cpu",
-                "text": "CPU :             ",
+                "text": "CPU :                 ",
                 "font_name": "Inter",
                 "base_font_size": self.stat_size,
                 "base_pos": (50, 410),
@@ -141,7 +144,7 @@ class BaseMonitorWindow(QMainWindow):
             },
             {
                 "key": "ram",
-                "text": "RAM :             ",
+                "text": "RAM :                 ",
                 "font_name": "Inter",
                 "base_font_size": self.stat_size,
                 "base_pos": (180, 410),
@@ -151,7 +154,7 @@ class BaseMonitorWindow(QMainWindow):
             },
             {
                 "key": "disk",
-                "text": "DISK :              ",
+                "text": "DISK :                  ",
                 "font_name": "Inter",
                 "base_font_size": self.stat_size ,
                 "base_pos": (310, 410),
