@@ -19,12 +19,13 @@ import psutil
 from collections import defaultdict
 
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
-from PySide6.QtCore    import Qt, QTimer, QPointF
+from PySide6.QtCore    import Qt, QTimer, QPointF, QThread, Signal
 from PySide6.QtGui     import QPainter, QColor, QPen, QFont, QFontMetrics
 
 from base_window      import BaseMonitorWindow
 from fluid_plot       import FluidRenderer, build_color_map, _dyn_pad
 from scatter_details  import draw_detail_box, BOX_W, BOX_GAP, box_rect
+import ai_engine
 
 
 # ─── Layout constants ────────────────────────────────────────────────────────
@@ -229,6 +230,25 @@ def _compute_targets(data: list[dict], x_slots: dict,
     return nodes
 
 
+# ─── AI Worker thread ────────────────────────────────────────────────────────
+
+class _AIWorker(QThread):
+    """
+    Calls ai_engine.explain_process_by_pid() in a background thread
+    so the UI never freezes while waiting for the LLM.
+    Emits result_ready(str) when the explanation is ready.
+    """
+    result_ready = Signal(str)
+
+    def __init__(self, process_name: str):
+        super().__init__()
+        self.process_name = process_name
+
+    def run(self):
+        text = ai_engine.explain_process_by_pid(0, self.process_name)
+        self.result_ready.emit(text)
+
+
 # ─── Widget ──────────────────────────────────────────────────────────────────
 
 class ScatterPlotWidget(QWidget):
@@ -259,6 +279,10 @@ class ScatterPlotWidget(QWidget):
         self._panel_open    : bool       = False
         self._panel_proc    : str        = ""
         self._panel_parent  : str        = ""
+
+        # AI explanation state
+        self._panel_ai_text : str        = ""
+        self._ai_worker     : _AIWorker | None = None
 
         self._anim = QTimer(self)
         self._anim.timeout.connect(self._step)
@@ -374,6 +398,11 @@ class ScatterPlotWidget(QWidget):
                     return   # inside panel — do nothing
             # Outside panel → close it and let blobs expand back
             self._panel_open = False
+            self._panel_ai_text = ""
+            # Stop any in-flight AI request
+            if self._ai_worker and self._ai_worker.isRunning():
+                self._ai_worker.terminate()
+                self._ai_worker = None
             self._rebuild_targets()
             self.update()
             return
@@ -385,13 +414,28 @@ class ScatterPlotWidget(QWidget):
             self._panel_proc   = d["label"]
             self._panel_parent = self._get_parent_name(d["label"])
             self._panel_open   = True
+            self._panel_ai_text = "⏳ Loading explanation..."
             self._rebuild_targets()   # narrows blob area → blobs LERP left
             self.update()
+
+            # Stop previous worker if still running
+            if self._ai_worker and self._ai_worker.isRunning():
+                self._ai_worker.terminate()
+
+            # Start background LLM call
+            self._ai_worker = _AIWorker(self._panel_proc)
+            self._ai_worker.result_ready.connect(self._on_ai_done)
+            self._ai_worker.start()
 
     def resizeEvent(self, e):
         if self._data:
             self._rebuild_targets()
         super().resizeEvent(e)
+
+    def _on_ai_done(self, text: str):
+        """Called by _AIWorker when the LLM response is ready. Triggers repaint."""
+        self._panel_ai_text = text
+        self.update()
 
     # ── paint ────────────────────────────────────────────────────────
 
@@ -472,7 +516,8 @@ class ScatterPlotWidget(QWidget):
         # Detail panel — drawn last so it's always on top
         if self._panel_open:
             draw_detail_box(painter, px, py, pw, ph,
-                            self._panel_proc, self._panel_parent)
+                            self._panel_proc, self._panel_parent,
+                            self._panel_ai_text)
 
 
 # ─── Standalone window ───────────────────────────────────────────────────────
@@ -483,6 +528,8 @@ class ScatterPlotWindow(BaseMonitorWindow):
         self.setWindowTitle("Scatter Plot - Critique CLI")
         self.resize(WIN_W, WIN_H)
 
+        self._last_disk_io = psutil.disk_io_counters()
+        
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)

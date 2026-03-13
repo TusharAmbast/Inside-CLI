@@ -2,7 +2,7 @@ import platform
 import ollama
 
 # Configuration
-MODEL_NAME = "Qwen2.5-1.5B-Instruct"  # Check your exact model name in `ollama list`
+MODEL_NAME = "Qwen2.5-1.5B-Instruct:latest"  # Check your exact model name in `ollama list`
 CURRENT_OS = platform.system()  # Returns 'Windows', 'Darwin' (Mac), or 'Linux'
 
 # Initialize Client
