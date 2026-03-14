@@ -2,8 +2,8 @@ import platform
 import ollama
 
 # Configuration
-MODEL_NAME = "Qwen2.5-1.5B-Instruct:latest"  # Check your exact model name in `ollama list`
-CURRENT_OS = platform.system()  # Returns 'Windows', 'Darwin' (Mac), or 'Linux'
+MODEL_NAME = "Qwen2.5-1.5B-Instruct:latest"
+CURRENT_OS = platform.system()  # 'Windows', 'Darwin' (Mac), or 'Linux'
 
 # Initialize Client
 try:
@@ -11,42 +11,86 @@ try:
 except:
     print("Error: Could not connect to Ollama. Make sure it is running!")
 
+
 def get_command_from_text(user_query):
     """
-    STRICT MODE: Converts natural language to a shell command.
+    Converts natural language to a shell command.
+    On Windows: targets CMD (cmd.exe) — NOT PowerShell.
+    subprocess.run(shell=True) uses cmd.exe on Windows.
     """
-    # 1. Detect OS to guide the model
-    shell_type = "PowerShell" if CURRENT_OS == "Windows" else "Bash/Zsh"
-    
-    # 2. Construct the Prompt
-    # We tell the model explicitly which OS we are on.
-    system_instruction = (
-        f"You are a command line assistant for {CURRENT_OS} using {shell_type}. "
-        "Output ONLY the executable command. No markdown, no explanation."
-    )
-    
-    prompt = f"System: {system_instruction}\nInstruct: {user_query}\nOutput:"
-
-    # 3. Call Ollama (Low Temp = Precise)
-    try:
-        response = client.generate(
-            model=MODEL_NAME,
-            prompt=prompt,
-            options={
-                "temperature": 0.1, 
-                "stop": ["Output:", "Instruct:", "\n\n"]
-            }
+    if CURRENT_OS == "Windows":
+        shell_name = "Windows CMD (cmd.exe)"
+        examples = (
+            "User: show current directory\n"
+            "Command: cd\n\n"
+            "User: list all files\n"
+            "Command: dir\n\n"
+            "User: show hidden files\n"
+            "Command: dir /a\n\n"
+            "User: create a folder named test\n"
+            "Command: mkdir test\n\n"
+            "User: delete file log.txt\n"
+            "Command: del log.txt\n\n"
+            "User: show running processes\n"
+            "Command: tasklist\n\n"
+            "User: clear the screen\n"
+            "Command: cls\n\n"
         )
-        # Clean up any markdown code blocks if the model adds them
-        cmd = response['response'].strip()
-        if cmd.startswith("`"): cmd = cmd.replace("`", "")
+    else:
+        shell_name = "Bash"
+        examples = (
+            "User: show current directory\n"
+            "Command: pwd\n\n"
+            "User: list all files\n"
+            "Command: ls -la\n\n"
+            "User: show running processes\n"
+            "Command: ps aux\n\n"
+            "User: clear the screen\n"
+            "Command: clear\n\n"
+        )
+
+    try:
+        response = client.chat(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"You are a {shell_name} command generator.\n"
+                        "Rules:\n"
+                        "- Output ONLY a single raw command. Nothing else.\n"
+                        "- No backticks, no markdown, no explanations, no comments.\n"
+                        "- No pipelines unless absolutely necessary.\n"
+                        "- Use the simplest possible command that does the job.\n"
+                        f"- Commands must work in {shell_name} only.\n\n"
+                        "Examples:\n"
+                        f"{examples}"
+                        f"Now respond with ONLY the command for the user's request."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": user_query
+                }
+            ],
+            options={"temperature": 0.1}
+        )
+        cmd = response['message']['content'].strip()
+        # Strip markdown/backticks if model still adds them
+        cmd = cmd.replace("```", "").replace("`", "").strip()
+        # Take only the first line — ignore any trailing explanation
+        cmd = cmd.splitlines()[0].strip()
+        # Strip "Command: " prefix if model echoes the format
+        if cmd.lower().startswith("command:"):
+            cmd = cmd[len("command:"):].strip()
         return cmd
     except Exception as e:
         return f"Error: {e}"
 
+
 def explain_process_by_pid(pid, process_name):
     """
-    CREATIVE MODE: Explains what a process does using chat format.
+    Explains what a process does using chat format.
     """
     try:
         response = client.chat(
@@ -63,8 +107,6 @@ def explain_process_by_pid(pid, process_name):
             ],
             options={"temperature": 0.6}
         )
-        
         return response['message']['content'].strip()
-        
     except Exception as e:
         return f"Could not generate explanation: {e}"
