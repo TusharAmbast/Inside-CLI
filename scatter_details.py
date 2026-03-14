@@ -131,6 +131,7 @@ def draw_detail_box(painter: QPainter,
 
     bx, by, bw, bh = box_rect(plot_x, plot_y, plot_w, plot_h)
     rect = QRectF(bx + 0.5, by + 0.5, bw - 1, bh - 1)
+    max_w = bw - pad_h * 2
 
     # Box background + border
     painter.setBrush(BG_CLR)
@@ -154,16 +155,16 @@ def draw_detail_box(painter: QPainter,
 
     # Wrap the process name in case it's long
     for ln in _wrap_text(proc_name, proc_font, max_w):
-        if ny > by + bh - PAD_V:
+        if ny > by + bh - pad_v:
             break
-        painter.drawText(bx + PAD_H, ny, ln)
+        painter.drawText(bx + pad_h, ny, ln)
         ny += fm_n.height()
 
     # ── Thin divider line between header and AI text ──────────────────
     divider_y = ny + 10
     painter.setPen(QPen(QColor(63, 72, 101, 60), 1))
-    painter.drawLine(bx + PAD_H, divider_y,
-                     bx + bw - PAD_H, divider_y)
+    painter.drawLine(bx + pad_h, divider_y,
+                     bx + bw - pad_h, divider_y)
 
     # ── AI explanation text (small, word-wrapped) ─────────────────────
     ai_font = QFont("Georgia", 8)
@@ -172,7 +173,7 @@ def draw_detail_box(painter: QPainter,
     line_h  = fm_ai.height() + 2   # a little extra leading
 
     # Clip drawing to stay inside the box bottom
-    clip_bottom = by + bh - PAD_V
+    clip_bottom = by + bh - pad_v  
 
     # Show muted colour for loading state, normal colour for real text
     if ai_text.startswith("⏳"):
@@ -185,29 +186,7 @@ def draw_detail_box(painter: QPainter,
     for ln in _wrap_text(ai_text, ai_font, max_w):
         if ay > clip_bottom:
             # Too long to fit — draw "…" on last visible line
-            painter.drawText(bx + PAD_H, ay - line_h + fm_ai.ascent(), "…")
+            painter.drawText(bx + pad_h, ay - line_h + fm_ai.ascent(), "…")
             break
-        painter.drawText(bx + PAD_H, ay, ln)
+        painter.drawText(bx + pad_h, ay, ln)
         ay += line_h
-    max_w = bw - pad_h * 2
-    chars = list(proc_name)
-    line  = ""
-    lines = []
-    for ch in chars:
-        test = line + ch
-        if fm_n.horizontalAdvance(test) <= max_w:
-            line = test
-        else:
-            if line:
-                lines.append(line)
-            line = ch
-    if line:
-        lines.append(line)
-    if not lines:
-        lines = [proc_name]
-
-    for ln in lines:
-        if ny > by + bh - pad_v:
-            break
-        painter.drawText(bx + pad_h, ny, ln)
-        ny += fm_n.height()

@@ -296,7 +296,12 @@ class ScatterPlotElement(QObject):
             bx, by, bw, bh = box_rect(px, py, pw, ph)
             if bx <= mx <= bx + bw and by <= my <= by + bh:
                 return   # click inside panel — ignore
-            self._panel_open = False
+            # Close panel — reset AI state and stop any in-flight worker
+            self._panel_open    = False
+            self._panel_ai_text = ""
+            if self._ai_worker and self._ai_worker.isRunning():
+                self._ai_worker.terminate()
+                self._ai_worker = None
             self._rebuild_targets(px, py, pw, ph)
             self._request_update()
             return
@@ -304,11 +309,26 @@ class ScatterPlotElement(QObject):
         idx = self._hit_node(mx, my)
         if 0 <= idx < len(self._data):
             d = self._data[idx]
-            self._panel_proc   = d["label"]
-            self._panel_parent = self._get_parent_name(d["label"])
-            self._panel_open   = True
+            self._panel_proc    = d["label"]
+            self._panel_parent  = self._get_parent_name(d["label"])
+            self._panel_open    = True
+            self._panel_ai_text = "⏳ Loading explanation..."
             self._rebuild_targets(px, py, pw, ph)
             self._request_update()
+
+            # Stop previous worker if still running
+            if self._ai_worker and self._ai_worker.isRunning():
+                self._ai_worker.terminate()
+
+            # Start background LLM call
+            self._ai_worker = _AIWorker(self._panel_proc)
+            self._ai_worker.result_ready.connect(self._on_ai_done)
+            self._ai_worker.start()
+
+    def _on_ai_done(self, text: str):
+        """Called by _AIWorker when the LLM response is ready."""
+        self._panel_ai_text = text
+        self._request_update()
 
     def draw(self, painter: QPainter, px: int, py: int,
              pw: int, ph: int):
@@ -388,7 +408,8 @@ class ScatterPlotElement(QObject):
         # Detail panel — drawn last so it's always on top
         if self._panel_open:
             draw_detail_box(painter, px, py, pw, ph,
-                            self._panel_proc, self._panel_parent)
+                            self._panel_proc, self._panel_parent,
+                            self._panel_ai_text)
 
     # ── internal ─────────────────────────────────────────────────────
 
@@ -474,6 +495,10 @@ class ScatterPlotWidget(QWidget):
         self._panel_open    : bool = False
         self._panel_proc    : str  = ""
         self._panel_parent  : str  = ""
+
+        # AI explanation state
+        self._panel_ai_text : str             = ""
+        self._ai_worker     : _AIWorker | None = None
 
         self._anim = QTimer(self)
         self._anim.timeout.connect(self._step)
