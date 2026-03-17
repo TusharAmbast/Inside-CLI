@@ -116,6 +116,8 @@ class BaseMonitorWindow(QMainWindow):
         
         # Add bottom stats
         self.add_bottom_stats()
+
+        self._last_disk_io = psutil.disk_io_counters()
         
         # Setup timer for live stats updates
         self.stats_timer = QTimer()
