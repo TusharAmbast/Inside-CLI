@@ -15,7 +15,9 @@ from io import StringIO
 from io import TextIOWrapper
 import ai_engine  # Import our new file
 from animations import Animations
-anim = Animations()
+from inside_cli_ascii import main_animation
+anim = main_animation()
+# anim = Animations()
 
 def find_in_path(command):
     default_path = "/bin:/usr/bin:/usr/local/bin"
@@ -289,7 +291,8 @@ def main():
                     readline.add_history(cmd)
     load_history()
     
-    anim.banner()
+    # anim.banner()
+    anim
     # print("Welcome to my CLI Baby!")
     print(" ")
     
