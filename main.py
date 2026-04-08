@@ -48,7 +48,7 @@ def monitor_system(*args):
         script_dir = os.path.dirname(__file__)
         
         # Get the full path to the system_monitor.py script
-        monitor_script_path = os.path.join(script_dir, "system_monitor.py")
+        monitor_script_path = os.path.join(script_dir, "mon.py")
 
         # Use Popen to launch it as a new process and NOT wait for it.
         # This is the non-blocking part.

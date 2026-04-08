@@ -149,7 +149,7 @@ class SystemUsageWindow(BaseMonitorWindow):
     def _update_anomaly_cards(self, anomalies: list):
         self._last_anomalies = anomalies
         self._clear_card_layout()
-
+            
         if not anomalies:
             empty = QLabel("No anomalies detected.")
             empty.setFont(QFont("Inter", 11))
