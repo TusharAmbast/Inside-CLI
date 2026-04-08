@@ -214,6 +214,38 @@ def get_command_from_text(user_query):
         return f"Error: {e}"
 
 
+def classify_process_importance(pid: int, process_name: str) -> str:
+    """
+    Asks the LLM whether a process is safe to kill or critical to the system.
+    Used as Layer 3 fallback in anomaly.py when Layers 1 & 2 are inconclusive.
+
+    Returns:
+        'safe'     — process can be safely terminated
+        'critical' — process is important, should not be killed
+    """
+    try:
+        response = client.generate(
+            model=MODEL_NAME,
+            prompt=(
+                f"Instruct: Is the process '{process_name}' (PID: {pid}) "
+                f"safe to terminate on a running system, or is it a critical "
+                f"system/OS process that should not be killed? "
+                f"Reply with exactly one word: safe or critical.\nOutput:"
+            ),
+            options={
+                "temperature": 0.1,
+                "stop": ["Instruct:", "Output:", "<|endoftext|>"]
+            }
+        )
+        result = response['response'].strip().lower().split()[0]
+        if result in ('safe', 'critical'):
+            return result
+        # If the model returns something unexpected, fall back conservatively
+        return 'critical'
+    except Exception:
+        return 'critical'
+
+
 def explain_process_by_pid(pid, process_name):
     """
     Explains what a process does.
