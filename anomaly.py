@@ -11,6 +11,7 @@ from PySide6.QtCore import QTimer, Qt, Signal, QThread, QObject, Slot, QEvent
 from PySide6.QtGui import QColor, QFont, QEnterEvent
 
 from base_window import BaseMonitorWindow
+import ai_engine
 
 
 # ==============================================================================
@@ -291,10 +292,12 @@ class AnomalyWorker(QObject):
                     )
 
                     if importance == 'undecided':
-                        # Layer 3: fall back to condition count
-                        # 2 conditions -> less severe -> safe to remove
-                        # 3 conditions -> more severe -> treat as important
-                        importance = 'safe' if matched == 2 else 'critical'
+                        # Layer 3: ask the LLM to classify by process name
+                        # Falls back to 'critical' internally if the call fails
+                        importance = ai_engine.classify_process_importance(
+                            pid=row['pid'],
+                            process_name=row['name'],
+                        )
 
                     anomalies.append({
                         'pid':   row['pid'],
