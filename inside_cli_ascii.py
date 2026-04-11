@@ -19,16 +19,15 @@ BLOCKS = [
 # Your custom 8-bit ANSI pairs (Text, Shadow)
 # I've added a few more to make sure we have at least 9
 COLOR_PAIRS = [
-    ("\033[38;5;218m", "\033[38;5;230m"),
-    ("\033[38;5;238m", "\033[38;5;210m"),
-    ("\033[38;5;117m", "\033[38;5;24m"),
-    ("\033[38;5;155m", "\033[38;5;22m"),
-    # ("\033[38;5;208m", "\033[38;5;52m"),
-    ("\033[38;5;141m", "\033[38;5;54m"),
-    ("\033[38;5;200m", "\033[38;5;89m"),
-    ("\033[38;5;51m",  "\033[38;5;23m"),
-    ("\033[38;5;226m", "\033[38;5;94m"),
-    ("\033[38;5;220m" ,"\033[38;5;160m")
+    ("\033[38;5;51m",  "\033[38;5;214m"),   # Cyan text & Bright Orange shadow
+    ("\033[38;5;118m", "\033[38;5;213m"),   # Lime Green text & Hot Pink shadow
+    ("\033[38;5;226m", "\033[38;5;93m"),    # Bright Yellow text & Bright Purple shadow
+    ("\033[38;5;210m", "\033[38;5;51m"),    # Salmon text & Cyan shadow
+    ("\033[38;5;171m", "\033[38;5;118m"),   # Violet text & Lime Green shadow
+    ("\033[38;5;218m", "\033[38;5;230m"),   # Soft Pink & Cornsilk
+    ("\033[38;5;220m" ,"\033[38;5;160m"),   # RED and gold
+    ("\033[38;5;231m", "\033[38;5;160m"),   # Pure White / Crimson
+    ("\033[38;5;210m", "\033[38;5;220m")    # Salmon text, Yellow 
 ]
 
 RESET = "\033[0m"
@@ -37,7 +36,7 @@ def draw_letter(idx, text_color, shadow_color):
     x_offset = sum(b[1] for b in BLOCKS[:idx])
     for row, line in enumerate(BLOCKS[idx][0]):
         # Position cursor relative to terminal home
-        sys.stdout.write(f"\033[{row+5};{x_offset+5}H") 
+        sys.stdout.write(f"\033[{row+3};{x_offset+5}H") 
         
         # Replace structural/shadow characters with the shadow color
         styled = ""
@@ -87,7 +86,8 @@ def main_animation():
             draw_letter(i, final_pair[0], final_pair[1])
             time.sleep(0.1)
             
-        sys.stdout.write(f"\033[13;5H{final_pair[0]}INTELLISHELL INITIALIZED...{RESET}\n\n")
+        # Move cursor down and print 2 blank lines before ending
+        sys.stdout.write(f"\033[10;5H")
 
     finally:
         sys.stdout.write("\033[?25h") # Show cursor
