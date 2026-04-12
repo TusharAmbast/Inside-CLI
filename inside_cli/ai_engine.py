@@ -6,10 +6,11 @@ MODEL_NAME = "Qwen2.5-1.5B-Instruct:latest"
 CURRENT_OS = platform.system()  # 'Windows', 'Darwin' (Mac), or 'Linux'
 
 # Initialize Client
+client = None
 try:
     client = ollama.Client(host="http://localhost:11434")
-except:
-    print("Error: Could not connect to Ollama. Make sure it is running!")
+except Exception as e:
+    print(f"Critique-CLI Warning: Could not connect to Ollama. {e}")
 
 
 # ─── Lookup Tables ────────────────────────────────────────────────────────────

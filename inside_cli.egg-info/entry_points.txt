@@ -1,0 +1,2 @@
+[console_scripts]
+inside-cli = inside_cli.main:main

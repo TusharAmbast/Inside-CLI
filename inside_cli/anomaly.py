@@ -11,7 +11,7 @@ from PySide6.QtCore import QTimer, Qt, Signal, QThread, QObject, Slot, QEvent
 from PySide6.QtGui import QColor, QFont, QEnterEvent
 
 from base_window import BaseMonitorWindow
-import ai_engine
+import inside_cli.ai_engine as ai_engine
 
 
 # ==============================================================================
