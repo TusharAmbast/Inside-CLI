@@ -2,7 +2,7 @@ import platform
 import ollama
 
 # Configuration
-MODEL_NAME = "Qwen2.5-1.5B-Instruct:latest"
+MODEL_NAME = "Qwen2.5-CLI-v2:latest"
 CURRENT_OS = platform.system()  # 'Windows', 'Darwin' (Mac), or 'Linux'
 
 # Initialize Client
