@@ -162,6 +162,7 @@ Please open an issue first for major changes so we can discuss what you'd like t
 
 **Tushar Ambast**
 - GitHub: [@TusharAmbast](https://github.com/TusharAmbast)
+
 **Hritik Routia**
 - GitHub: [@oghritik](https://github.com/oghritik)
 
