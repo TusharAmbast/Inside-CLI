@@ -160,9 +160,12 @@ Please open an issue first for major changes so we can discuss what you'd like t
 
 ## Author
 
-**Tushar Ambast**
+# Tushar Ambast
 - GitHub: [@TusharAmbast](https://github.com/TusharAmbast)
-**Hritik Routia**
+
+<br>
+
+# Hritik Routia
 - GitHub: [@oghritik](https://github.com/oghritik)
 
 ---
