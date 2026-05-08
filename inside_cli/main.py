@@ -16,10 +16,13 @@ except ImportError:
 
 from io import StringIO
 from io import TextIOWrapper
-import inside_cli.ai_engine as ai_engine  # Import our new file
+import inside_cli.ai_engine as ai_engine  
+from inside_cli.setup import run_setup, CUSTOM_MODEL_NAME
+import ollama
 from .animations import Animations
 from inside_cli.inside_cli_ascii import main_animation
 anim = main_animation()
+
 # anim = Animations()
 
 def check_ollama():
@@ -284,6 +287,7 @@ def cat (command, args):
 # ---------------------------------------------------------------main----------------------------------------------------
 
 def main():
+    run_setup()
     # Set default PATH for robust command execution
     if not os.environ.get("PATH"):
         default_path = "/bin:/usr/bin:/usr/local/bin"

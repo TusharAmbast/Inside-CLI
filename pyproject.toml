@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inside-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "Your project description"
 requires-python = ">=3.8"
 dependencies = [
@@ -83,7 +83,7 @@ packages = ["inside_cli"]
 
 [tool.setuptools.package-data]
 # This makes sure your non-python files are bundled
-"*" = ["Fonts/*", "macos/*", "CLI Figma/*", "animations_old/*"]
+"inside_cli" = ["Modelfile", "Fonts/*", "macos/*", "CLI Figma/*", "animations_old/*"]
 
 [project.scripts]
 inside-cli = "inside_cli.main:main"
