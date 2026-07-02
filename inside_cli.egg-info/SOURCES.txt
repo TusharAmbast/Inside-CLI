@@ -1,5 +1,6 @@
 README.md
 pyproject.toml
+inside_cli/Modelfile
 inside_cli/__init__.py
 inside_cli/ai_engine.py
 inside_cli/animations.py
@@ -17,6 +18,7 @@ inside_cli/mon.py
 inside_cli/monitor.py
 inside_cli/scatter_details.py
 inside_cli/scatter_plot.py
+inside_cli/setup.py
 inside_cli/system_monitor.py
 inside_cli/tempCodeRunnerFile.py
 inside_cli.egg-info/PKG-INFO

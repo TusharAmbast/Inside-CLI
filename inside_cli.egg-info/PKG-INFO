@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: inside-cli
-Version: 0.1.1
+Version: 0.1.3
 Summary: Your project description
 Requires-Python: >=3.8
 Requires-Dist: annotated-types==0.7.0

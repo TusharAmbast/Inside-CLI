@@ -1,0 +1,16 @@
+FROM {MODEL_PATH}
+
+TEMPLATE """{{ if .System }}{{ .System }}
+{{ end }}{{ range .Messages }}{{ if eq .Role "user" }}Instruct: {{ .Content }}
+Output: {{ else }}{{ .Content }}
+{{ end }}{{ end }}"""
+
+SYSTEM "You are a Windows command line and process expert.
+For explanations: Be concise and technical.
+For commands: Output only the command needed, no markdown or chatter."
+
+PARAMETER stop <|endoftext|>
+PARAMETER stop Instruct:
+PARAMETER stop Output:
+PARAMETER temperature 0.1
+PARAMETER top_p 0.9
